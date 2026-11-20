@@ -156,3 +156,140 @@ export function niceShot(gain = 1, pan = 0) {
   bell(t, 1319 * 1, 0.05 * gain, pan, 0.3)
   bell(t + 0.08, 1760, 0.05 * gain, pan, 0.3)
 }
+
+// --- Match UI + juice (hub/match.js) ---------------------------------------------------------
+// Power bar ratchet: a dry wooden click that climbs in pitch as the cue is drawn back.
+export function powerTick(k = 0) {
+  if (!ok(0.04, 1.5)) return
+  const t = now()
+  modal({ t, f: vary(900 + k * 1300, 0.03), modes: [[1, 1, 0.018], [2.6, 0.35, 0.01]], strike: 0.12, gain: 0.07 + k * 0.05, bus: A.ui })
+}
+// Who-breaks roulette: one tick per face, then a bright chord when it lands.
+export function rouletteTick(k = 0) {
+  if (!ok(0.05, 1.5)) return
+  modal({ f: vary(1500 + k * 500, 0.02), modes: [[1, 1, 0.03], [3.1, 0.3, 0.015]], strike: 0.2, gain: 0.12, bus: A.ui })
+}
+export function breakerPicked() {
+  if (!ok(1.2)) return
+  const t = now()
+  ;[659, 831, 988, 1319].forEach((f, i) => bell(t + i * 0.05, f, 0.07, 0, 0.35))
+  burst({ t, noise: 'pink', f: 1200, f2: 6000, a: 0.02, d: 0.4, gain: 0.05, verb: 0.3 })
+}
+// Tutorial: a soft two-note "here's the next thing" and a sparkle when a step is done.
+export function tutStep() {
+  if (!ok(0.5)) return
+  const t = now()
+  bell(t, 1047, 0.05, 0, 0.3)
+  bell(t + 0.09, 1568, 0.045, 0, 0.3)
+}
+export function stepDone() {
+  sparkle(0.06)
+}
+export function yourTurn() {
+  if (!ok(0.6)) return
+  const t = now()
+  tone({ t, type: 'triangle', f: 587, d: 0.12, gain: 0.07, lp: 2600, bus: A.ui })
+  tone({ t: t + 0.08, type: 'triangle', f: 880, d: 0.2, gain: 0.07, lp: 2600, bus: A.ui })
+}
+export function opponentTurn() {
+  if (!ok(0.5)) return
+  const t = now()
+  tone({ t, type: 'triangle', f: 523, d: 0.14, gain: 0.05, lp: 1800, bus: A.ui })
+  tone({ t: t + 0.1, type: 'triangle', f: 392, d: 0.22, gain: 0.05, lp: 1800, bus: A.ui })
+}
+export function foul() {
+  if (!ok(1)) return
+  const t = now()
+  tone({ t, type: 'square', f: 220, f2: 180, d: 0.18, gain: 0.05, lp: 900 })
+  tone({ t: t + 0.17, type: 'square', f: 165, f2: 120, d: 0.32, gain: 0.05, lp: 700 })
+  burst({ t, noise: 'brown', type: 'lowpass', f: 300, d: 0.2, gain: 0.12 })
+}
+export function groupAssigned() {
+  if (!ok(0.8)) return
+  const t = now()
+  ;[784, 988, 1175].forEach((f, i) => bell(t + i * 0.07, f, 0.06, 0, 0.3))
+}
+// Streak: an arpeggio that climbs one step higher for every pot in a row.
+export function streak(n = 1) {
+  if (!ok(1)) return
+  const t = now()
+  const base = 523 * Math.pow(1.122, Math.min(8, n - 1))
+  ;[1, 1.26, 1.5, 2].forEach((r, i) => bell(t + i * 0.055, base * r, 0.055, (i - 1.5) * 0.2, 0.35))
+  burst({ t, noise: 'pink', f: 600, f2: 4000, q: 0.7, a: 0.03, d: 0.35, gain: 0.06, verb: 0.25 })
+}
+export function coin() {
+  cash(2)
+}
+// Ability: a bubbly blip as it fills, a rising shimmer when it is ready.
+export function abilityGain() {
+  if (!ok(0.3)) return
+  const t = now()
+  tone({ t, f: 600, f2: 1400, glide: 0.12, d: 0.14, gain: 0.05, bus: A.ui })
+}
+export function abilityReady() {
+  if (!ok(1.5)) return
+  const t = now()
+  burst({ t, noise: 'pink', f: 400, f2: 7000, q: 1.2, a: 0.5, d: 0.3, gain: 0.08, verb: 0.4 })
+  ;[1047, 1319, 1568, 2093].forEach((f, i) => bell(t + 0.3 + i * 0.06, f, 0.05, 0, 0.4))
+}
+// Fire shot: a "fwoomp" of air and a crackle of embers.
+export function fireArm() {
+  if (!ok(1.2)) return
+  const t = now()
+  burst({ t, noise: 'pink', type: 'lowpass', f: 300, f2: 3200, a: 0.12, d: 0.45, gain: 0.3 })
+  tone({ t, f: 80, f2: 160, glide: 0.3, d: 0.4, gain: 0.12 })
+  crackle(t + 0.1, 0.6, 0.08)
+}
+export function fireShot(power = 1) {
+  if (!ok(1)) return
+  const t = now()
+  burst({ t, noise: 'brown', type: 'lowpass', f: 900, f2: 200, a: 0.01, d: 0.5, gain: 0.35 * power })
+  burst({ t, noise: 'pink', type: 'bandpass', f: 2500, f2: 600, q: 0.8, a: 0.01, d: 0.4, gain: 0.12 * power })
+  crackle(t, 0.5, 0.07)
+}
+function crackle(t, dur, gain) {
+  for (let i = 0; i < 14; i++) burst({ t: t + Math.random() * dur, f: vary(3500, 0.5), q: 3, a: 0.0005, d: 0.008, gain: gain * rnd(0.4, 1) })
+}
+// Camera moves get a soft air sweep.
+export function whoosh(k = 1) {
+  if (!ok(0.4, 0.8)) return
+  burst({ noise: 'pink', f: 350, f2: 1800, q: 0.7, a: 0.12, d: 0.3, gain: 0.035 * k, bus: A.ui })
+}
+export function spinSet() {
+  click()
+}
+export function clockTick(urgent = false) {
+  if (!ok(0.1)) return
+  modal({ f: urgent ? 1900 : 1400, modes: [[1, 1, 0.04], [2.7, 0.3, 0.02]], strike: 0.25, gain: urgent ? 0.14 : 0.08, bus: A.ui })
+}
+export function placeBall() {
+  if (!ok(0.15)) return
+  const t = now()
+  modal({ t, f: vary(2600, 0.05), modes: [[1, 1, 0.03], [2.3, 0.4, 0.015]], strike: 0.3, gain: 0.12 })
+  burst({ t, noise: 'brown', type: 'lowpass', f: 500, d: 0.04, gain: 0.12 })
+}
+
+// Rolling rumble: a looped brown-noise bed under the cloth whose level and
+// brightness follow how fast the balls are rolling (setRoll every frame).
+let roll = null
+export function setRoll(level = 0) {
+  if (!A.ctx) return
+  if (!roll) {
+    const src = A.ctx.createBufferSource()
+    src.buffer = A.noise.brown ?? A.noise.white
+    if (!src.buffer) return
+    src.loop = true
+    const lp = A.ctx.createBiquadFilter()
+    lp.type = 'lowpass'
+    lp.frequency.value = 200
+    const g = A.ctx.createGain()
+    g.gain.value = 0
+    src.connect(lp).connect(g).connect(A.sfx)
+    src.start()
+    roll = { g, lp }
+  }
+  const k = Math.max(0, Math.min(1, level))
+  const t = A.ctx.currentTime
+  roll.g.gain.setTargetAtTime(k * 0.22, t, 0.08)
+  roll.lp.frequency.setTargetAtTime(160 + k * 500, t, 0.08)
+}

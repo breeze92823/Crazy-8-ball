@@ -28,6 +28,14 @@ import { createBoards } from './hub/boards.js'
 import { createHud } from './hub/hud.js'
 import { COUNTRIES } from './hub/paint.js'
 import { createMatch } from './hub/match.js'
+import { createMenus } from './hub/menus.js'
+import { createAbilityScreen } from './hub/abilityScreen.js'
+import { addCash as grantCash, addXp, onChange, persist, save, tutorialFinished, xpForWin } from './progress.js'
+import { initNet, net } from './net.js'
+import { applyCueLook, cueById } from './cues.js'
+import { createRemotePlayers } from './remotePlayers.js'
+import { createEmoteMenu } from './hub/emotemenu.js'
+import { BOT_WIN_EMOTES, EMOTE_BY_ID } from './emotes.js'
 
 // Boot order: Bloxity SDK -> renderer -> Rapier (async wasm) -> sky + lighting,
 // the rooftop hub (tower, city, props, tables, bots), player body -> avatar
@@ -37,23 +45,8 @@ let renderer = null
 let postfx = null
 let fx = null
 
-// --- Save (local) -------------------------------------------------------------------
-const save = (() => {
-  const def = { cash: ECONOMY.startCash, wins: 0, streak: 0, tutorialDone: false, settings: { sfx: 0.8, ambience: 0.8, piano: true, guide: true, tags: true, night: false } }
-  try {
-    const raw = JSON.parse(localStorage.getItem(ECONOMY.storageKey) || 'null')
-    return raw ? { ...def, ...raw, settings: { ...def.settings, ...raw.settings } } : def
-  } catch {
-    return def
-  }
-})()
-function persist() {
-  try {
-    localStorage.setItem(ECONOMY.storageKey, JSON.stringify(save))
-  } catch {
-    // storage blocked: this session only
-  }
-}
+// --- Save: progress.js (server save via net.js, browser copy offline) + device settings --------
+initNet()
 
 // Settings come from the portal's settings menu (or their defaults offline).
 function applySetting(key, value) {
@@ -130,7 +123,7 @@ const regionFlag = (() => {
   const r = loc.split('-')[1]?.toUpperCase()
   return COUNTRIES[r] ? r : 'US'
 })()
-const me = { id: 'me', isPlayer: true, name: myName(), flag: regionFlag, rank: Math.min(8, Math.floor(save.wins / 5)), streak: save.streak, wins: save.wins, color: '#3dff8a', x: SPAWN.x, z: SPAWN.z, y: 0, zone: null }
+const me = { id: 'me', isPlayer: true, tag: save.tag, name: myName(), flag: regionFlag, rank: Math.min(8, Math.floor(save.wins / 5)), streak: save.streak, wins: save.wins, color: '#3dff8a', x: SPAWN.x, z: SPAWN.z, y: 0, zone: null }
 const boards = createBoards(layout.boardMats, regionFlag)
 
 // --- Player avatar ----------------------------------------------------------
@@ -147,8 +140,10 @@ function setAvatar(next) {
   avatar = next
   playerGroup.add(avatar)
   animator = makeAnimator(avatar)
-  attachCue(avatar)
+  handCue = attachCue(avatar)
+  applyCueLook(handCue, save.cue)
 }
+let handCue = null
 
 setAvatar(buildDefaultCharacter()) // visible immediately; replaced once the rig loads
 
@@ -227,13 +222,42 @@ bloxity.onReservedAreas((areas) => {
 })
 
 // The player's match (match.js) takes over the camera and input while it runs.
-const match = createMatch({ scene, camera, renderer, tables, hud, me, bots })
+const match = createMatch({ scene, camera, renderer, tables, hud, me, bots, fx, save, persist, addCash: (n) => addCash(n), getMyGroup: () => playerGroup })
 
 function addCash(n) {
-  save.cash += n
-  hud.setCash(save.cash)
-  persist()
+  grantCash(n)
 }
+
+// --- Windows: Cues / Index, Free Reward, Ranked, Bag + hotbar (menus.js) ----------------------------
+const menus = createMenus({
+  inMatch: () => match.active,
+  onOpen(open) {
+    inMenu = open
+    if (open) emoteMenu.close() // a window takes the screen: the Emotes panel steps aside
+  },
+})
+// --- Ability Spin screen (abilityScreen.js; its button joins the menus' side stack) ------------------
+const abilities = createAbilityScreen({
+  onOpen() {
+    inMenu = true
+  },
+  onClose() {
+    inMenu = false
+    syncYawToPlayer()
+  },
+})
+let pendingReveal = [] // rank-ups / starter cue earned in a match: shown once back in the hub
+onChange((key) => {
+  if (key === 'cash' || key === 'all') hud.setCash(save.cash)
+  if (key === 'cue' || key === 'all') applyCueLook(handCue, save.cue)
+  if (key === 'tag' || key === 'all') me.tag = save.tag
+  if (key === 'all') {
+    me.wins = save.wins
+    me.streak = save.streak
+    hud.setStreak(save.streak)
+    hud.showSkip(!save.tutorialDone)
+  }
+})
 
 // --- Pads ---------------------------------------------------------------------
 let leftZone = null // the pad the player just left via the button: ignored until they step off it
@@ -284,7 +308,13 @@ tables.on((type, data) => {
       if (data.winners.includes(e)) {
         e.wins++
         e.streak++
-      } else e.streak = 0
+        e.cash = (e.cash ?? 0) + ECONOMY.winReward
+        e.rank = Math.min(8, Math.max(e.rank, Math.floor(e.wins / 5)))
+        e.animator?.playEmote(EMOTE_BY_ID[BOT_WIN_EMOTES[Math.floor(Math.random() * BOT_WIN_EMOTES.length)]]) // celebrate
+      } else {
+        e.streak = 0
+        e.cash = (e.cash ?? 0) + ECONOMY.lossReward
+      }
     }
     if (near && !tables.all(t).includes(me)) hud.popup(`${data.winners[0]?.name ?? 'Team'} wins!`, new Vector3(t.x, 2.6, t.z), '#ffffff', 0.8)
   } else if (type === 'match') {
@@ -306,6 +336,10 @@ match.onEnd(({ won, reward }) => {
     save.tutorialDone = true
     hud.showSkip(false)
   }
+  const starter = tutorialFinished()
+  if (starter) pendingReveal.push(() => menus.reveal({ title: 'FIRST MATCH!', cues: [starter] }))
+  const paid = won ? addXp(xpForWin(save.streak)) : []
+  if (paid.length) pendingReveal.push(() => menus.rankUps(paid))
   persist()
 })
 
@@ -317,6 +351,18 @@ onModeChanged((mode) => {
 onKey('KeyV', toggleMode)
 onKey('KeyN', () => lighting.toggleDayNight())
 onKey('KeyR', doRespawn)
+
+// --- Emotes + the other players in the room (remotePlayers.js; synced through net.js's room) -----
+const remotes = createRemotePlayers(scene)
+const emoteMenu = createEmoteMenu({ renderer, onPlay: playEmote })
+function playEmote(e) {
+  if (match.active || !animator) return
+  animator.playEmote(e)
+  remotes.sendEmote(e.id)
+  sentEmote = e.id
+}
+onKey('KeyB', () => !match.active && emoteMenu.toggle())
+let sentEmote = null // the emote the others were told this player plays
 installTouch({ mode: toggleMode, day: () => lighting.toggleDayNight(), respawn: doRespawn })
 bots.seedGames(4)
 
@@ -330,7 +376,8 @@ let wasGrounded = true
 let fallSpeed = 0
 let lastTick = 0
 const cardPos = new Vector3()
-const entities = [me, ...bots.list]
+const entities = [me, ...bots.list] // + the remote players, refilled every frame
+const localEntities = entities.length
 
 function nearestTable(x, z, range) {
   let best = null
@@ -436,16 +483,15 @@ renderer.setAnimationLoop(() => {
   guide.update(dt, elapsed, p.x, p.z)
   let tut = ''
   if (match.active) tut = ''
-  else if (myTable?.state === 'countdown') tut = `Match starts in ${Math.max(1, Math.ceil(myTable.timer))}...`
-  else if (myTable) tut = `Waiting for players ${tables.members(myTable)}/${myTable.cap}`
-  else if (!save.tutorialDone) tut = idleTime > 6 ? 'Need help? Follow the arrow!' : 'Join a table!'
+  else if (!myTable && !save.tutorialDone) tut = idleTime > 6 ? 'Need help? Follow the arrow!' : 'Join a table!'
   hud.setTutorial(tut)
+  hud.setLobby(myTable && !match.active && (myTable.state === 'waiting' || myTable.state === 'countdown') ? { count: `${tables.members(myTable)}/${myTable.cap}`, text: myTable.state === 'countdown' ? `Starting in ${Math.max(1, Math.ceil(myTable.timer))}` : 'Waiting for players...', ready: myTable.state === 'countdown' } : null)
   hud.showLeave(!!myTable && !match.active && myTable.state !== 'match')
-  fx.setSparkZone(me.zone ?? (showGuide ? target : null), me.zone ? PAD.mine : PAD.open)
+  fx.setSparkZone(match.active ? null : me.zone ?? (showGuide ? target : null), me.zone ? PAD.mine : PAD.open)
 
   // floating card over the nearest table
   let card = null
-  const ct = myTable ?? (match.active ? null : nearestTable(p.x, p.z, PAD.cardRange))
+  const ct = match.active ? null : myTable ?? nearestTable(p.x, p.z, PAD.cardRange)
   if (ct) {
     const n = tables.members(ct)
     const status = ct.state === 'countdown' ? { cls: 'ready', text: 'READY!' } : ct.state === 'waiting' ? { cls: 'waiting', text: 'WAITING' } : ct.state === 'playing' || ct.state === 'match' ? { cls: 'playing', text: 'PLAYING' } : null
@@ -453,7 +499,9 @@ renderer.setAnimationLoop(() => {
     card = { pos: cardPos, title: ct.mode, host: ct.host?.name ?? null, count: `${n}/${ct.cap}`, status }
   }
 
-  if (!match.active) updateCamera(camera, dt)
+  if (match.active && abilities.isOpen()) abilities.close()
+  if (abilities.isOpen()) abilities.frameCamera(camera, dt)
+  else if (!match.active) updateCamera(camera, dt)
   world.update(dt, elapsed)
   lighting.update(dt, playerGroup.position)
   roof.facade.emissiveIntensity = lighting.windows()
@@ -470,8 +518,27 @@ renderer.setAnimationLoop(() => {
   const chime = at(0, -26, 6, 34)
   updateAmbience(dt, { night: lighting.getNight(), fire: fire.gain, firePan: fire.pan, piano: piano.gain * AUDIO.ambience.piano, pianoPan: piano.pan, chime: chime.gain, chimePan: chime.pan, pianoOn: save.settings.piano })
 
+  // emotes: a match cuts them; when one ends or is cut (moved) the others are told
+  if (match.active) animator?.stopEmote()
+  const emoteNow = animator?.emoteId ?? null
+  if (sentEmote && !emoteNow) {
+    remotes.sendEmote('')
+    sentEmote = null
+  }
+  emoteMenu.setPlaying(emoteNow)
+  emoteMenu.setVisible(!match.active)
+  // the other players: send this one's presence, draw theirs, list everyone
+  me.cash = save.cash
+  remotes.update(dt, { x: p.x, y: p.y, z: p.z, yaw: player.facing, speed }, { wins: save.wins, cash: save.cash, rank: me.rank, flag: me.flag })
+  entities.length = localEntities
+  for (const e of remotes.entities) entities.push(e)
   hud.setPlayers(entities, me)
-  hud.update(dt, camera, entities, card, save.settings.tags && !match.active)
+  hud.update(dt, camera, entities, card, save.settings.tags && (!match.active || match.freeCam))
+  menus.update(dt)
+  if (pendingReveal.length && !match.active) {
+    for (const fn of pendingReveal) fn()
+    pendingReveal = []
+  }
   postfx.render()
 
   if (shownLoading) {
@@ -490,5 +557,5 @@ if (import.meta.env.DEV) {
     resetPlayer({ x, y, z }, facing)
     syncYawToPlayer()
   }
-  window.__game = { player, scene, renderer, camera, postfx, toggleMode, teleport, tables, bots, me, match, save, lighting, isFirstPerson }
+  window.__game = { player, scene, renderer, camera, postfx, toggleMode, teleport, tables, bots, me, match, save, menus, net, abilities, lighting, isFirstPerson }
 }

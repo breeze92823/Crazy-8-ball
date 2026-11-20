@@ -13,6 +13,21 @@ const SVG = {
   crown: '<svg viewBox="0 0 26 22"><path d="M2 6l6 5 5-9 5 9 6-5-2 13H4z" fill="#ffd23d" stroke="#14163a" stroke-width="2" stroke-linejoin="round"/></svg>',
   people: '<svg viewBox="0 0 26 26"><g fill="#4dabf7" stroke="#14163a" stroke-width="1.8"><circle cx="17" cy="8" r="4"/><path d="M10 22c0-5 3-8 7-8s7 3 7 8z"/><circle cx="9" cy="10" r="4.4"/><path d="M1 24c0-5.5 3.5-8.5 8-8.5s8 3 8 8.5z"/></g></svg>',
 }
+// Players panel helpers: a hexagon rank badge (rim colour by tier 0..8) and compact money.
+const TIER = ['#a7b0c2', '#a7b0c2', '#c98a4b', '#c98a4b', '#8fd0ff', '#8fd0ff', '#ff5d73', '#ff5d73', '#ffd23d']
+const PLAYERS_EVERY = 0.4 // s
+function rankBadge(rank) {
+  const c = TIER[Math.max(0, Math.min(8, rank | 0))]
+  return `<svg class="rb" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z" fill="${c}" stroke="#14163a" stroke-width="2.4" stroke-linejoin="round"/><path d="M16 6.5l8.2 4.8v9.4L16 25.5l-8.2-4.8v-9.4z" fill="#4a5578" stroke="#14163a" stroke-width="1.4"/><circle cx="16" cy="16" r="5.6" fill="#16182c"/><circle cx="16" cy="16" r="3.2" fill="#fff"/><text x="16" y="17.9" font-size="5" font-weight="700" text-anchor="middle" fill="#14163a" font-family="Fredoka, sans-serif">8</text></svg>`
+}
+// $21,941 below 100K, then $295K / $1.2M / $3B.
+export function money(n) {
+  const short = (v, unit) => `$${v < 10 ? v.toFixed(1).replace(/\.0$/, '') : Math.floor(v)}${unit}`
+  if (n >= 1e9) return short(n / 1e9, 'B')
+  if (n >= 1e6) return short(n / 1e6, 'M')
+  if (n >= 1e5) return `$${Math.floor(n / 1e3)}K`
+  return `$${Math.floor(n).toLocaleString('en-US')}`
+}
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 function el(tag, cls, html) {
   const e = document.createElement(tag)
@@ -38,12 +53,18 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
   const players = el('div', 'hud-players')
   const pill = el('button', 'hud-pill', `<span class="hud-outline pc">Players (1)</span>${SVG.chev}`)
   const list = el('div', 'hud-list')
+  const playerRows = el('div', 'hud-rows')
+  list.append(el('div', 'hud-lh', '<span>Wins</span><span>Money</span>'), playerRows)
   players.append(pill, list)
   row.append(gear, players)
   const skip = el('button', 'hud-skip hud-outline', 'Skip tutorial')
   tr.append(row, skip)
   root.append(tr)
-  pill.addEventListener('click', () => players.classList.toggle('open'))
+  pill.addEventListener('click', () => {
+    players.classList.toggle('open')
+    playersAt = -Infinity // refresh the rows right away
+    lastPlayers = ''
+  })
   skip.addEventListener('click', () => onSkip())
 
   // --- cash + streak ---
@@ -53,6 +74,9 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
   bl.append(streak, cash)
   root.append(bl)
 
+  // lobby bar while standing on a pad: [cue] [people n/cap] Waiting... / Starting in 3
+  const lobby = el('div', 'hud-lobby hidden', `<span class="lb-cue"><svg viewBox="0 0 32 32"><path d="M6 27L25 6" stroke="#14163a" stroke-width="6" stroke-linecap="round"/><path d="M6 27L25 6" stroke="#e7cd98" stroke-width="3.2" stroke-linecap="round"/><path d="M6 27l6-7" stroke="#5a2f1c" stroke-width="3.4" stroke-linecap="round"/><circle cx="25" cy="25" r="4" fill="#fff" stroke="#14163a" stroke-width="2"/></svg></span><span class="lb-count">${SVG.people}<b>1/2</b></span><span class="lb-text"></span>`)
+  root.append(lobby)
   const leave = el('button', 'hud-leave hud-outline hidden', 'Leave table')
   leave.addEventListener('click', () => onLeave())
   root.append(leave)
@@ -122,9 +146,9 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
     let t = tags.get(e)
     if (!t) {
       const d = el('div', 'tag')
-      d.innerHTML = `<div class="tag-streak hud-outline hidden">${SVG.flame}<span></span></div><div class="tag-row"><span class="tag-badge ${e.rank >= 8 ? 'r8' : e.rank >= 5 ? 'r5' : ''}"><i>${e.rank}</i></span><span class="hud-outline nm">${esc(e.name)}</span><img class="tag-flag" alt="" src="${flagDataUrl(e.flag)}"></div>`
+      d.innerHTML = `<div class="tag-streak hud-outline hidden">${SVG.flame}<span></span></div><div class="tag-row"><span class="tag-badge ${e.rank >= 8 ? 'r8' : e.rank >= 5 ? 'r5' : ''}"><i>${e.rank}</i></span><span class="hud-outline tag-ct hidden"></span><span class="hud-outline nm">${esc(e.name)}</span><img class="tag-flag" alt="" src="${flagDataUrl(e.flag)}"></div>`
       world.append(d)
-      t = { el: d, streakEl: d.querySelector('.tag-streak'), num: d.querySelector('.tag-streak span'), last: -1 }
+      t = { el: d, streakEl: d.querySelector('.tag-streak'), num: d.querySelector('.tag-streak span'), last: -1, ct: d.querySelector('.tag-ct'), lastTag: '' }
       tags.set(e, t)
     }
     return t
@@ -156,6 +180,8 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
   let lastCash = null
   let lastStreak = -1
   let lastPlayers = ''
+  let playersAt = -Infinity
+  let playersCount = -1
   let tutText = null
   let toastTimer = 0
   return {
@@ -171,6 +197,22 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
         tut.classList.remove('pop')
         void tut.offsetWidth
         tut.classList.add('pop')
+      }
+    },
+    setLobby(info) {
+      lobby.classList.toggle('hidden', !info)
+      if (!info) return
+      const key = `${info.count}|${info.text}`
+      if (lobby.dataset.key === key) return
+      const bump = lobby.dataset.key && lobby.dataset.key.split('|')[1] !== info.text
+      lobby.dataset.key = key
+      lobby.querySelector('.lb-count b').textContent = info.count
+      lobby.querySelector('.lb-text').textContent = info.text
+      lobby.classList.toggle('ready', !!info.ready)
+      if (bump) {
+        lobby.classList.remove('bump')
+        void lobby.offsetWidth
+        lobby.classList.add('bump')
       }
     },
     showSkip(on) {
@@ -197,13 +239,22 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
       streak.classList.toggle('hidden', n <= 0)
       streak.querySelector('span').textContent = n
     },
+    // Players panel: everyone in the hub (you first, then by wins) with their rank badge, flag,
+    // wins and money. Re-read at most every PLAYERS_EVERY s, rebuilt only when open and changed.
     setPlayers(entities, me) {
-      const sorted = [...entities].sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name))
-      const key = sorted.map((e) => `${e.name}${e.wins}`).join('|')
+      const now = performance.now()
+      if (now - playersAt < PLAYERS_EVERY * 1000 && entities.length === playersCount) return
+      playersAt = now
+      if (entities.length !== playersCount) {
+        playersCount = entities.length
+        pill.querySelector('.pc').textContent = `Players (${entities.length})`
+      }
+      if (!players.classList.contains('open')) return
+      const sorted = [...entities].sort((a, b) => (b === me) - (a === me) || b.wins - a.wins || (b.cash ?? 0) - (a.cash ?? 0) || a.name.localeCompare(b.name))
+      const key = sorted.map((e) => `${e.name}|${e.wins}|${e.cash ?? 0}|${e.rank}|${e.flag}`).join(',')
       if (key === lastPlayers) return
       lastPlayers = key
-      pill.querySelector('.pc').textContent = `Players (${entities.length})`
-      list.innerHTML = sorted.map((e) => `<div class="hud-li${e === me ? ' me' : ''}"><span class="dot" style="background:${e.color}"></span><span class="nm">${esc(e.name)}</span><img alt="" src="${flagDataUrl(e.flag)}"><span class="w">${e.wins}</span></div>`).join('')
+      playerRows.innerHTML = sorted.map((e) => `<div class="hud-li${e === me ? ' me' : ''}">${rankBadge(e.rank)}<span class="nm">${esc(e.name)}</span>${e.flag ? `<img alt="" src="${flagDataUrl(e.flag)}">` : '<i class="nf"></i>'}<span class="w">${e.wins}</span><span class="m hud-outline">${money(e.cash ?? 0)}</span></div>`).join('')
     },
     toast(text, sub = '', seconds = 2.2) {
       toast.innerHTML = `${esc(text)}${sub ? `<small>${esc(sub)}</small>` : ''}`
@@ -220,6 +271,14 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
         toastTimer -= dt
         if (toastTimer <= 0) toast.classList.remove('show')
       }
+      // a player who left (remote players come and go): drop their tag
+      if (tags.size > entities.length) {
+        for (const [e, t] of tags) {
+          if (entities.includes(e)) continue
+          t.el.remove()
+          tags.delete(e)
+        }
+      }
       for (const e of entities) {
         const t = tagFor(e)
         head.set(e.x, (e.y ?? 0) + 2.35, e.z)
@@ -233,6 +292,12 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
         const k = Math.max(0.42, Math.min(1.05, 11 / d))
         t.el.style.transform = `translate(-50%, -100%) translate(${s[0]}px, ${s[1]}px) scale(${k})`
         t.el.style.zIndex = String(1000 - Math.round(d))
+        if (t.lastTag !== (e.tag || '')) {
+          // ranked chat tag, e.g. [BRONZE], in front of the name
+          t.lastTag = e.tag || ''
+          t.ct.classList.toggle('hidden', !t.lastTag)
+          t.ct.textContent = t.lastTag ? `[${t.lastTag}]` : ''
+        }
         if (t.last !== e.streak) {
           t.last = e.streak
           t.streakEl.classList.toggle('hidden', !(e.streak > 0))

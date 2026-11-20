@@ -5,12 +5,15 @@ import { Group } from 'three'
 import { BOTS, LOBBY, PLAYER_DIMS, RIG_HEIGHT, TABLE } from '../config.js'
 import { buildDefaultCharacter } from '../avatar/character.js'
 import { makeAnimator } from '../avatar/animator.js'
+import { BOT_IDLE_EMOTES, EMOTE_BY_ID } from '../emotes.js'
 import { buildCue } from './props.js'
+import { CUES, applyCueLook } from '../cues.js'
 import { findPath, randomFree } from './nav.js'
 import { floorAt } from './layout.js'
 
 const rnd = (a, b) => a + Math.random() * (b - a)
 const pick = (a) => a[Math.floor(Math.random() * a.length)]
+const BOT_CUES = CUES.filter((c) => ['common', 'uncommon', 'rare', 'epic', 'legendary'].includes(c.rarity)).map((c) => c.id)
 const angDiff = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a))
 
 // Gives a character a cue in its right hand (rig units: the rig is scaled to metres).
@@ -48,15 +51,20 @@ export function createBots(scene, tables) {
     group.add(character)
     scene.add(group)
     const [x, z] = randomFree()
+    // a history to match the badge (rank = wins / 5, as for the player): the Players panel shows it
+    const rank = Math.floor(Math.random() * 9)
+    const wins = rank < 8 ? rank * 5 + Math.floor(Math.random() * 5) : 40 + Math.floor(Math.random() * 260)
     const bot = {
       id: `bot${i}`,
       isPlayer: false,
       name: names[i % names.length],
       flag: pick(BOTS.flags),
-      rank: Math.floor(Math.random() * 9),
+      rank,
       streak: Math.random() < 0.3 ? 1 + Math.floor(Math.random() * 5) : 0,
-      wins: 0,
+      wins,
+      cash: Math.round(wins * rnd(120, 900) + rnd(200, 6000)),
       color: colors.shirt,
+      colors,
       x,
       z,
       y: 0,
@@ -75,6 +83,9 @@ export function createBots(scene, tables) {
       zone: null,
     }
     bot.cue = attachCue(character)
+    // a random cue from the shop rarities, so the hub shows the catalog off
+    bot.cueId = pick(BOT_CUES)
+    applyCueLook(bot.cue, bot.cueId)
     bot.stance = (sx, sz, facing) => {
       bot.stanceAt = { x: sx, z: sz, facing }
     }
@@ -206,6 +217,8 @@ export function createBots(scene, tables) {
       switch (bot.state) {
         case 'idle':
           bot.timer -= dt
+          // now and then an idle bot emotes (emotes.js); walking off cuts it short
+          if (bot.timer > 2.5 && !bot.animator.emoteId && Math.random() < dt * BOTS.emoteChance) bot.animator.playEmote(EMOTE_BY_ID[pick(BOT_IDLE_EMOTES)])
           if (bot.timer <= 0 && !bot.reserved) decide(bot)
           break
         case 'walk':

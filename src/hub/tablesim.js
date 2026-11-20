@@ -3,6 +3,10 @@
 // elastic ball-ball impacts, cushions with pocket mouths and pocket capture.
 // Each ball keeps a quaternion so it can be drawn rolling. Events report
 // impacts so the caller can play positional sounds.
+// Ability shot modifiers (`mods`, the player's match only; see shoot()) bend the
+// rules for one shot: livelier cushions, a heavier cue ball, a cue ball that
+// ghosts through the wrong balls, pull points (magnet pockets, a black hole),
+// a portal pair, a cue ball that can't scratch and a callback on cue-ball hits.
 import { Quaternion, Vector3 } from 'three'
 import { TABLE } from '../config.js'
 
@@ -35,6 +39,8 @@ export function createSim() {
     firstHit: -1, // first object ball the cue ball touched this shot
     railAfter: false,
     sunkThisShot: [],
+    spin: null,
+    mods: null,
     rack,
     shoot,
     step,
@@ -71,6 +77,7 @@ export function createSim() {
     }
     for (let i = 0; i < 15; i++) if (fill[i] === null) fill[i] = rest.pop()
     for (const b of balls) Object.assign(b, { vx: 0, vz: 0, on: true, sunk: 0, pocket: -1 })
+    sim.mods = null
     fill.forEach((n, i) => {
       balls[n].x = spots[i][0] + (rnd() - 0.5) * 0.002
       balls[n].z = spots[i][1]
@@ -82,22 +89,128 @@ export function createSim() {
     const c = balls[0]
     Object.assign(c, { x, z, vx: 0, vz: 0, on: true, sunk: 0, pocket: -1 })
   }
-  // angle: radians in the table plane (0 = +x), power: m/s
-  function shoot(angle, speed) {
+  // angle: radians in the table plane (0 = +x), power: m/s.
+  // spin (optional): { x: side -1..1 (+ = right english), y: -1 draw .. +1 follow, elev: 0..1 cue elevation }
+  // mods (optional, ability shots; cleared by the next shoot/rack):
+  //   railE: cushion restitution for every ball, cueRailE: for the cue ball only (wins over railE)
+  //   cueMass: the cue ball's mass (object balls weigh 1)
+  //   ghost(n): the cue ball passes through ball n until its first real contact
+  //   pulls: [{ x, z, r, accel, filter(n), swallow, max }] pull balls within r toward (x, z)
+  //          (speed capped at max); within `swallow` m of the centre a ball is swallowed
+  //          (pocketed there); time: s the pulls last
+  //   portals: [{ x, z }, { x, z }], portalR: a ball touching one comes out of the other
+  //   noScratch: the cue ball bounces out of a pocket instead of dropping
+  //   onCueHit(ball, speed): called when the cue ball strikes an object ball
+  function shoot(angle, speed, spin = null, mods = null) {
     const c = balls[0]
     c.vx = Math.cos(angle) * speed
     c.vz = Math.sin(angle) * speed
     sim.firstHit = -1
     sim.railAfter = false
     sim.sunkThisShot = []
+    sim.mods = mods
+    if (mods) mods.cool = new Float32Array(16)
+    sim.spin = spin && (spin.x || spin.y || spin.elev) ? { x: spin.x || 0, y: spin.y || 0, elev: spin.elev || 0, dx: Math.cos(angle), dz: Math.sin(angle), hit: false, curve: 0.9 } : null
     sim.events.push({ type: 'cue', speed, x: c.x, z: c.z, n: 0 })
+  }
+  // After the cue ball's first contact: follow (+y) carries it on along the shot line, draw (-y) pulls it back.
+  function applyFollow(c, v0) {
+    const s = sim.spin
+    if (!s || s.hit) return
+    s.hit = true
+    const k = s.y * 0.62 * v0
+    c.vx += s.dx * k
+    c.vz += s.dz * k
+  }
+  // Side spin bends the rebound off a cushion (rotate the outgoing velocity), and wears off.
+  function applySide(c) {
+    const s = sim.spin
+    if (!s || Math.abs(s.x) < 0.02) return
+    const a = s.x * 0.32
+    const ca = Math.cos(a)
+    const sa = Math.sin(a)
+    const vx = c.vx * ca - c.vz * sa
+    c.vz = c.vx * sa + c.vz * ca
+    c.vx = vx
+    s.x *= 0.45
+  }
+  function railE(b) {
+    const m = sim.mods
+    if (!m) return RAIL_E
+    if (b.n === 0 && m.cueRailE) return m.cueRailE
+    return m.railE ?? RAIL_E
+  }
+  // Pull points and portals, once per substep.
+  function applyMods(m, h) {
+    // pulls only last `time` s of the shot, so nothing can keep rolling forever
+    if (m.time != null && m.pulls) {
+      m.time -= h
+      if (m.time <= 0) m.pulls = null
+    }
+    if (m.pulls) {
+      for (const p of m.pulls) {
+        for (const b of balls) {
+          if (!b.on || (p.filter && !p.filter(b.n))) continue
+          const dx = p.x - b.x
+          const dz = p.z - b.z
+          const d = Math.hypot(dx, dz)
+          if (d > p.r) continue
+          if (p.swallow && d < p.swallow) {
+            b.on = false
+            b.pocket = -1
+            b.sunk = 0
+            b.x = p.x
+            b.z = p.z
+            b.vx = b.vz = 0
+            sim.sunkThisShot.push(b.n)
+            sim.events.push({ type: 'pocket', speed: 1, x: p.x, z: p.z, n: b.n, swallow: true })
+            continue
+          }
+          // stronger close in; a resting ball is woken up
+          const a = (p.accel * (1.2 - d / p.r)) / Math.max(d, 0.02)
+          b.vx += dx * a * h
+          b.vz += dz * a * h
+          // cap so the pull never launches a ball off the table
+          const sp = Math.hypot(b.vx, b.vz)
+          const cap = p.max ?? 3.2
+          if (sp > cap) {
+            b.vx *= cap / sp
+            b.vz *= cap / sp
+          }
+        }
+      }
+    }
+    if (m.portals) {
+      const pr = m.portalR ?? R * 1.6
+      for (const b of balls) {
+        if (!b.on) continue
+        if (m.cool[b.n] > 0) {
+          m.cool[b.n] -= h
+          continue
+        }
+        for (let k = 0; k < 2; k++) {
+          const p = m.portals[k]
+          if (Math.hypot(b.x - p.x, b.z - p.z) > pr) continue
+          const q = m.portals[1 - k]
+          const from = { x: b.x, z: b.z }
+          b.x = q.x + (b.x - p.x)
+          b.z = q.z + (b.z - p.z)
+          m.cool[b.n] = 0.35
+          sim.events.push({ type: 'portal', speed: Math.hypot(b.vx, b.vz), x: q.x, z: q.z, fx: from.x, fz: from.z, n: b.n })
+          break
+        }
+      }
+    }
   }
   function moving() {
     for (const b of balls) if (b.on && (b.vx !== 0 || b.vz !== 0)) return true
     return false
   }
   function step(dt) {
-    const sub = 8
+    // enough substeps that no ball moves more than ~half a radius per substep (fast fire shots, slow frames)
+    let vmax = 0
+    for (const b of balls) if (b.on) vmax = Math.max(vmax, Math.abs(b.vx) + Math.abs(b.vz))
+    const sub = Math.min(48, Math.max(8, Math.ceil((vmax * dt) / (R * 0.5))))
     const h = dt / sub
     for (let s = 0; s < sub; s++) substep(h)
     // rolling rotation for drawing
@@ -122,9 +235,18 @@ export function createSim() {
       }
       b.vx *= ns / sp
       b.vz *= ns / sp
+      if (b.n === 0 && sim.spin && !sim.spin.hit && sim.spin.elev > 0.05 && sim.spin.x) {
+        // masse: an elevated cue with side spin curves the cue ball sideways
+        const a = sim.spin.x * sim.spin.elev * 1.6 * h * sim.spin.curve
+        const vx = b.vx * Math.cos(a) - b.vz * Math.sin(a)
+        b.vz = b.vx * Math.sin(a) + b.vz * Math.cos(a)
+        b.vx = vx
+      }
       b.x += b.vx * h
       b.z += b.vz * h
     }
+    const mods = sim.mods
+    if (mods) applyMods(mods, h)
     // ball-ball
     for (let i = 0; i < 16; i++) {
       const a = balls[i]
@@ -139,19 +261,29 @@ export function createSim() {
         const d = Math.sqrt(d2)
         const nx = dx / d
         const nz = dz / d
+        // black flash: the cue ball ghosts through the wrong balls until it touches a right one
+        if (i === 0 && mods?.ghost && sim.firstHit < 0 && mods.ghost(b.n)) continue
         const overlap = 2 * R - d
-        a.x -= nx * overlap * 0.5
-        a.z -= nz * overlap * 0.5
-        b.x += nx * overlap * 0.5
-        b.z += nz * overlap * 0.5
+        const ma = i === 0 && mods?.cueMass ? mods.cueMass : 1
+        const wa = 1 / (ma + 1) // the heavier ball gives way less when two overlap
+        a.x -= nx * overlap * wa
+        a.z -= nz * overlap * wa
+        b.x += nx * overlap * (1 - wa)
+        b.z += nz * overlap * (1 - wa)
         const rel = (a.vx - b.vx) * nx + (a.vz - b.vz) * nz
         if (rel <= 0) continue
-        const jimp = (rel * (1 + BALL_E)) / 2
-        a.vx -= jimp * nx
-        a.vz -= jimp * nz
+        // two masses: impulse = rel (1 + e) ma mb / (ma + mb), mb = 1
+        const jimp = (rel * (1 + BALL_E) * ma) / (ma + 1)
+        const v0 = i === 0 ? Math.hypot(a.vx, a.vz) : 0
+        a.vx -= (jimp * nx) / ma
+        a.vz -= (jimp * nz) / ma
         b.vx += jimp * nx
         b.vz += jimp * nz
-        if (i === 0 && sim.firstHit < 0) sim.firstHit = j
+        if (i === 0 && sim.firstHit < 0) {
+          sim.firstHit = j
+          applyFollow(a, v0)
+        }
+        if (i === 0 && mods?.onCueHit) mods.onCueHit(b, rel)
         if (rel > 0.05) sim.events.push({ type: 'ball', speed: rel, x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, n: j })
       }
     }
@@ -161,6 +293,17 @@ export function createSim() {
       for (let p = 0; p < POCKETS.length; p++) {
         const [px, pz, pr] = POCKETS[p]
         if (Math.hypot(b.x - px, b.z - pz) < pr - R * 0.25) {
+          if (b.n === 0 && mods?.noScratch) {
+            // catch-a-ball: the cue ball is caught at the pocket and set back on the cloth
+            const l = Math.hypot(px, pz) || 1
+            b.x = px - (px / l) * (pr + R * 0.6)
+            b.z = pz - (pz / l) * (pr + R * 0.6)
+            b.x = Math.max(-HX + R, Math.min(HX - R, b.x))
+            b.z = Math.max(-HZ + R, Math.min(HZ - R, b.z))
+            b.vx = b.vz = 0
+            sim.events.push({ type: 'caught', speed: 0, x: b.x, z: b.z, n: 0 })
+            break
+          }
           b.on = false
           b.pocket = p
           b.sunk = 0
@@ -182,8 +325,9 @@ export function createSim() {
         b.z = s * (HZ - R)
         if (b.vz * s > 0) {
           const sp = Math.abs(b.vz)
-          b.vz = -b.vz * RAIL_E
-          b.vx *= 0.96
+          b.vz = -b.vz * railE(b)
+          if (!mods?.railE) b.vx *= 0.96
+          if (b.n === 0) applySide(b)
           if (sp > 0.05) sim.events.push({ type: 'rail', speed: sp, x: b.x, z: b.z, n: b.n })
           if (b.n === 0 || sim.firstHit >= 0) sim.railAfter = true
         }
@@ -193,8 +337,9 @@ export function createSim() {
         b.x = s * (HX - R)
         if (b.vx * s > 0) {
           const sp = Math.abs(b.vx)
-          b.vx = -b.vx * RAIL_E
-          b.vz *= 0.96
+          b.vx = -b.vx * railE(b)
+          if (!mods?.railE) b.vz *= 0.96
+          if (b.n === 0) applySide(b)
           if (sp > 0.05) sim.events.push({ type: 'rail', speed: sp, x: b.x, z: b.z, n: b.n })
           if (b.n === 0 || sim.firstHit >= 0) sim.railAfter = true
         }
