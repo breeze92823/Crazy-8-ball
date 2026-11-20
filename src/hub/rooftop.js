@@ -78,7 +78,8 @@ export function buildRooftop(scene) {
   group.add(tower)
   // cornice bands under the roof edge
   const stone = new MeshStandardMaterial({ color: '#efe6e1', roughness: 0.85 })
-  put(group, new BoxGeometry(W + 2.2, 1.2, D + 2.2), stone, 0, -0.6, cz, false).receiveShadow = true
+  // top sits 3 cm under the tiled floor plane (y = 0): coplanar tops z-fought and striped the roof
+  put(group, new BoxGeometry(W + 2.2, 1.2, D + 2.2), stone, 0, -0.63, cz, false).receiveShadow = true
   put(group, new BoxGeometry(W + 1.6, 0.5, D + 1.6), M.dark(), 0, -1.45, cz, false)
 
   // --- parapet + glass railing all round ---

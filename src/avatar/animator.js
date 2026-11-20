@@ -44,6 +44,30 @@ class PlayerAnimator {
     this.idleTime = 0
     this.airTime = 0
     this.bank = 0
+    // Emote overlay (emotes.js): blended over the locomotion pose while standing still.
+    this.emote = null
+    this.emoteOn = false
+    this.emoteTime = 0
+    this.emoteWeight = 0
+    this.emoteSpin = 0
+    this.emotePose = new PoseBuffer()
+  }
+
+  // Plays emote `def` (emotes.js) from its start; moving or leaving the ground stops it.
+  playEmote(def) {
+    if (!def) return this.stopEmote()
+    this.emote = def
+    this.emoteOn = true
+    this.emoteTime = 0
+  }
+
+  stopEmote() {
+    this.emoteOn = false
+  }
+
+  // The emote playing now (null once it ended or was cut short).
+  get emoteId() {
+    return this.emoteOn ? this.emote.id : null
   }
 
   dispose() {
@@ -59,6 +83,7 @@ class PlayerAnimator {
     this.resolveState(dt, input)
     this.writePose(dt, input)
     this.blend(dt)
+    this.applyEmote(dt, input)
     this.rig.applyPose(this.output)
     this.applyVisual(dt, input)
   }
@@ -175,10 +200,34 @@ class PlayerAnimator {
     }
   }
 
+  applyEmote(dt, input) {
+    const e = this.emote
+    if (!e) return
+    if (this.emoteOn) {
+      this.emoteTime += dt
+      if (input.speed > L.idleSpeed || !input.grounded || (!e.loop && this.emoteTime >= e.dur)) this.emoteOn = false
+    }
+    // fade in fast, out a little slower (and at once when the player starts running)
+    const rate = this.emoteOn ? 12 : input.speed > L.idleSpeed ? 16 : 7
+    this.emoteWeight += ((this.emoteOn ? 1 : 0) - this.emoteWeight) * (1 - Math.exp(-rate * dt))
+    if (!this.emoteOn && this.emoteWeight < 0.01) {
+      this.emote = null
+      this.emoteWeight = 0
+      this.emoteSpin = 0
+      return
+    }
+    const p = this.emotePose
+    p.reset()
+    const time = this.emoteTime
+    const spin = e.pose(p, time) || 0
+    this.emoteSpin = Math.atan2(Math.sin(spin), Math.cos(spin)) // a finished turn fades out from 0, not back round
+    this.output.lerpBetween(this.output, p, this.emoteWeight)
+  }
+
   applyVisual(dt, input) {
     const wantBank = this.state === 'run' ? -input.turn * L.bankAngle * 0.6 : 0
     this.bank += (wantBank - this.bank) * (1 - Math.exp(-L.bankRate * dt))
-    this.root.rotation.set(0, 0, this.bank)
+    this.root.rotation.set(0, this.emoteSpin * this.emoteWeight, this.bank)
     this.root.position.y = this.output.bobY
   }
 }

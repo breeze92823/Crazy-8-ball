@@ -36,6 +36,7 @@
 
 /* top right: settings, players, skip */
 .hud-tr {
+  z-index: 2;
   position: absolute;
   top: var(--top);
   right: calc(var(--edge) + env(safe-area-inset-right, 0px));
@@ -68,28 +69,47 @@
 }
 .hud-pill .chev { width: 22px; height: 22px; transition: transform 0.25s; }
 .hud-players.open .chev { transform: rotate(180deg); }
+/* open: the pill becomes the header of one panel (Players (n) ^ / Wins Money / rows) */
+.hud-players.open { width: min(calc(100vw - 2 * var(--edge) - 56px), 460px); }
+.hud-players.open .hud-pill { width: 100%; border-radius: 22px 22px 0 0; box-shadow: none; }
 .hud-list {
-  position: absolute; right: 0; top: calc(100% + 6px);
-  width: min(80vw, 320px);
-  max-height: min(55dvh, 420px);
-  overflow-y: auto;
+  position: absolute; left: 0; right: 0; top: calc(100% - 3px);
   pointer-events: auto;
-  background: rgba(240, 246, 255, 0.97);
-  border: 3px solid #14163a;
-  border-radius: 18px;
-  padding: 6px;
+  background: linear-gradient(180deg, rgba(222, 236, 252, 0.97), rgba(206, 224, 248, 0.97));
+  border: 3px solid #14163a; border-top: 0;
+  border-radius: 0 0 22px 22px;
+  padding: 0 8px 8px;
   display: none;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 6px 0 rgba(20, 22, 58, 0.35), 0 12px 24px rgba(0, 0, 0, 0.25);
+  --cols: 3.2em 4.9em; /* Wins | Money column widths */
 }
 .hud-players.open .hud-list { display: block; animation: drop 0.18s ease-out; }
 @keyframes drop { from { opacity: 0; transform: translateY(-6px); } }
-.hud-li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 12px; color: #1b2550; font-weight: 600; font-size: 15px; }
-.hud-li:nth-child(odd) { background: rgba(27, 37, 80, 0.06); }
-.hud-li.me { background: rgba(61, 255, 138, 0.25); }
-.hud-li img { width: 22px; height: 15px; border-radius: 3px; }
-.hud-li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hud-li .w { color: #e58a00; font-weight: 700; }
-.hud-li .dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #14163a; }
+.hud-lh {
+  display: grid; grid-template-columns: 1fr var(--cols); gap: 6px; padding: 2px 12px 4px;
+  font-size: clamp(12px, 1.8vmin, 15px); font-weight: 700; text-align: right;
+}
+.hud-lh span:first-child { grid-column: 2; color: #2b8fe0; }
+.hud-lh span:last-child { color: #2fae4c; }
+.hud-rows {
+  max-height: min(calc(100dvh - var(--top) - 150px), 400px); overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 5px; padding: 2px;
+  scrollbar-width: thin; scrollbar-color: #9fb4d6 transparent; touch-action: pan-y;
+}
+.hud-li {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto var(--cols); align-items: center; gap: 7px;
+  min-height: 40px; padding: 4px 10px 4px 6px; border-radius: 12px;
+  background: #fff; border: 2.5px solid #14163a; box-shadow: 0 2px 0 rgba(20, 22, 58, 0.25);
+  color: #1b2550; font-weight: 700; font-size: clamp(14px, 2.1vmin, 17px);
+}
+.hud-li.me { background: linear-gradient(180deg, #d2ecff, #b4dcff); }
+.hud-li.me .nm { color: #2276d2; }
+.hud-li .rb { width: 28px; height: 28px; }
+.hud-li img, .hud-li .nf { width: 20px; height: 14px; border-radius: 2px; box-shadow: 0 0 0 1.5px #14163a; }
+.hud-li .nf { background: #d8deea; }
+.hud-li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-li .w { text-align: right; font-variant-numeric: tabular-nums; }
+.hud-li .m { text-align: right; color: #8cff6b; font-variant-numeric: tabular-nums; --outline: #14532d; white-space: nowrap; }
 .hud-skip {
   min-height: 40px; padding: 0 16px;
   border-radius: 999px; border: 3px solid #14163a;
@@ -134,7 +154,8 @@
 .touch-ui .hud-leave { bottom: calc(34vmin + env(safe-area-inset-bottom, 0px)); }
 
 /* world-anchored layers */
-.hud-world { position: absolute; inset: 0; overflow: hidden; }
+/* z-index 0: its own stack, so name tags never draw over the Players panel (.hud-tr) */
+.hud-world { position: absolute; inset: 0; overflow: hidden; z-index: 0; }
 .hud-world > * { position: absolute; left: 0; top: 0; will-change: transform; }
 .tag { display: flex; flex-direction: column; align-items: center; transform-origin: 50% 100%; white-space: nowrap; }
 .tag-row { display: flex; align-items: center; gap: 6px; font-size: 22px; font-weight: 700; }
@@ -222,3 +243,29 @@
   .tag-row { font-size: 18px; }
   .card-title { font-size: 30px; }
 }
+
+/* lobby bar (on a pad) */
+.hud-lobby {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + clamp(12px, 2.4vmin, 24px));
+  display: flex; align-items: center; gap: 10px; padding: 5px 22px 5px 6px; min-width: min(90vw, 460px);
+  background: linear-gradient(180deg, #ffffff, #e6eefb); border: 3px solid #14163a; border-radius: 999px;
+  color: #14163a; font-weight: 700; font-size: clamp(16px, 2.6vmin, 24px); box-shadow: 0 4px 0 rgba(20, 22, 58, 0.4);
+}
+.hud-lobby.hidden { display: none; }
+.hud-lobby .lb-cue { width: clamp(34px, 5vmin, 46px); aspect-ratio: 1; border-radius: 10px; background: linear-gradient(180deg, #5ee07a, #2fb84d); border: 2.5px solid #14163a; display: grid; place-items: center; padding: 4px; }
+.hud-lobby .lb-cue svg { width: 100%; height: 100%; }
+.hud-lobby .lb-count { display: flex; align-items: center; gap: 4px; padding: 2px 10px 2px 6px; border-radius: 999px; border: 2.5px solid #14163a; background: #dbe9ff; }
+.hud-lobby .lb-count svg { width: 1.2em; height: 1.2em; }
+.hud-lobby .lb-text { white-space: nowrap; }
+.hud-lobby.ready .lb-count { background: #c8f7d3; }
+.hud-lobby.bump .lb-text { animation: lbbump 0.35s cubic-bezier(.2, 1.7, .4, 1); display: inline-block; }
+@keyframes lbbump { from { transform: scale(1.35); } }
+/* the Leave button sits just above the lobby bar while both show */
+.hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(env(safe-area-inset-bottom, 0px) + clamp(70px, 11vmin, 96px)); }
+.touch-ui .hud-lobby { bottom: calc(24vmin + env(safe-area-inset-bottom, 0px)); }
+.touch-ui .hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(34vmin + env(safe-area-inset-bottom, 0px)); }
+
+/* ranked chat tag on a name tag (menus.js Ranked rewards) */
+.tag-ct { color: #ffb347; margin-right: 4px; font-weight: 700; }
+.tag-ct.hidden { display: none; }

@@ -77,6 +77,7 @@ export const LOBBY = {
 export const BOTS = {
   count: 14,
   walkSpeed: 4.2,
+  emoteChance: 0.06, // per second, while idling (emotes.js BOT_IDLE_EMOTES)
   names: ['cue_master77', 'PixelShark', 'nightowl_zz', 'Bankshot_Bea', 'luckylark09', 'MochiRolls', 'tofu_tactics', 'ZenBreaker', 'sk8rmilo', 'EightBallEli', 'chalkydust', 'RailRunner_x', 'KiwiKai', 'spinDoctor22', 'MintyMarlo', 'corner_pocket'],
   flags: ['PH', 'US', 'BR', 'ID', 'TH', 'MY', 'MX', 'GB', 'IN', 'JP', 'DE', 'FR', 'CA', 'VN', 'ES', 'KR', 'LK', 'PL'],
   shirts: ['#1d1d22', '#e94f37', '#3a86ff', '#ffbe0b', '#8338ec', '#2ec4b6', '#f4f1de', '#ff70a6', '#38b000', '#6c757d'],
@@ -84,7 +85,47 @@ export const BOTS = {
   hair: ['#2b1b12', '#4a2f1c', '#c96a2a', '#e8c070', '#111111', '#7a4b2a'],
   skin: ['#f2c79a', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'],
 }
-export const ECONOMY = { startCash: 0, storageKey: 'crazy-8-ball.save', winReward: 150, lossReward: 25 } // $ per match (Wins/money only, never premium currency)
+export const ECONOMY = { startCash: 0, storageKey: 'crazy-8-ball.save', winReward: 150, lossReward: 25, potReward: 20 } // $ per match (Wins/money only, never premium currency)
+// --- Game server (net.js; ../Crazy-8-ball-backend) ------------------------------------
+// Dev talks to a local backend (VITE_SERVER_URL_DEV overrides); production resolves the pod
+// through the Bloxity SDK. Without a server the game plays on the browser save.
+export const SERVER_URL = import.meta.env.DEV ? import.meta.env.VITE_SERVER_URL_DEV || 'ws://localhost:2567' : ''
+export const NET = { saveEvery: 4, requestTimeout: 8, retry: 3, retryMax: 60, rejoin: 2 } // s
+// Other players in the room (remotePlayers.js): pose updates a second, how fast a drawn remote eases
+// to its relayed pose (1/s), dead reckoning cap (s), and how many are drawn (nearest first).
+export const REMOTES = { poseHz: 10, lerp: 12, predictMax: 0.4, max: 24, maxTouch: 12 }
+
+// --- Free rewards (hub/menus.js). Server-authoritative timers/claims (backend daily.ts / gifts.ts);
+// the client grants the prize. A reward: { cash } | { block, n } | { cue } | { ability }.
+export const DAILY = {
+  days: [{ cash: 5000 }, { block: 'rare', n: 1, badge: 'RARE!' }, { block: 'mystery', n: 1 }, { cash: 30000 }, { block: 'mystery', n: 2 }, { block: 'epic', n: 1, badge: 'EPIC!' }, { cue: 'chroma' }],
+  unlockAllPrice: 250000, // cash: unlocks every remaining day this week (never premium currency)
+}
+export const TRACK = { days: 28, milestones: [{ day: 8, block: 'mystery', n: 1 }, { day: 14, block: 'rare', n: 1 }, { day: 21, cash: 50000 }, { day: 28, block: 'epic', n: 1 }] }
+export const GIFTS = [{ min: 5, cash: 250 }, { min: 15, cash: 250 }, { min: 30, cash: 500 }, { min: 45, cash: 500 }, { min: 60, cash: 1000, ability: true }]
+// One-off rewards: the Bonus tab, the Starter Cue after the first match, the Time Gift every new player gets.
+export const BONUS = { wins: 8, cue: 'eightBall' }
+export const STARTER = { cue: 'starter', timeGiftHours: 8.5 }
+export const BAG = { hotbar: 6, max: 200 }
+
+// --- Ranked (hub/menus.js): win matches for XP; each tier has 5 divisions (Legend has 1).
+// Reaching a division pays `cash`; division 1 of a tier also gives a lucky block, the tier's
+// chat tag (shown on the name tag) and the tier's cue.
+export const RANKED = {
+  winXp: 100, streakXp: 10, streakXpMax: 50, lossXp: 0,
+  tiers: [
+    { id: 'bronze', name: 'Bronze', color: '#d08a4a', dark: '#7a4416', xp: 200, cash: 2500, block: 'uncommon' },
+    { id: 'silver', name: 'Silver', color: '#c8d0dc', dark: '#6a7486', xp: 300, cash: 4000, block: 'uncommon' },
+    { id: 'gold', name: 'Gold', color: '#f2c94c', dark: '#8a6a10', xp: 400, cash: 6000, block: 'rare' },
+    { id: 'platinum', name: 'Platinum', color: '#a8c4e8', dark: '#4a6488', xp: 500, cash: 9000, block: 'rare' },
+    { id: 'diamond', name: 'Diamond', color: '#6ad8ea', dark: '#1a7486', xp: 650, cash: 13000, block: 'epic' },
+    { id: 'expert', name: 'Expert', color: '#ff6a6a', dark: '#a01a24', xp: 800, cash: 18000, block: 'epic' },
+    { id: 'veteran', name: 'Veteran', color: '#6ad87a', dark: '#1a7a2a', xp: 1000, cash: 25000, block: 'legendary' },
+    { id: 'master', name: 'Master', color: '#b88aff', dark: '#5a2aa8', xp: 1200, cash: 35000, block: 'legendary' },
+    { id: 'grandmaster', name: 'Grandmaster', color: '#ffd23d', dark: '#3a3a44', xp: 1500, cash: 50000, block: 'legendary' },
+    { id: 'legend', name: 'Legend', color: '#ff7ab8', dark: '#5a1a48', xp: 2500, cash: 100000, block: 'legendary', divisions: 1, sub: 'The King' },
+  ],
+}
 // The player's match (hub/match.js)
 export const MATCH = {
   shotClock: 30, // s per shot before it counts as a foul
@@ -92,6 +133,8 @@ export const MATCH = {
   aiSkill: 0.72, aiThink: [1.0, 2.2],
   fineAim: 0.35, // rad/s with the fine-aim buttons / A-D keys
   fov: 34, // narrow top-down lens so the players round the table don't loom
+  aimFov: 55, // behind-the-cue camera
+  watchFov: 42, // overview while the balls roll
 }
 
 // --- Player modes (modes.js) -------------------------------------------------
