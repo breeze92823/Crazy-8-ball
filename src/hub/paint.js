@@ -436,7 +436,9 @@ function globe(ctx, x, y, s) {
 }
 const MEDALS = ['#f5b301', '#b8c2cc', '#d08a4b']
 // rows: [{ name, flag, wins, color }] (players) or [{ flag, name, wins }] (countries)
-export function paintBoard(kind, rows, footer, w = 768, h = 1024) {
+// rows: players [{ name, flag ('' = none), wins, color }] / countries [{ flag, name, wins }];
+// emptyText is written in the middle when there are no rows.
+export function paintBoard(kind, rows, footer, w = 768, h = 1024, emptyText = '') {
   const c = canvas(w, h)
   const ctx = c.getContext('2d')
   ctx.fillStyle = '#e9eef8'
@@ -500,7 +502,7 @@ export function paintBoard(kind, rows, footer, w = 768, h = 1024) {
     } else {
       ctx.fillText(name, x, y + 2)
       const nw = ctx.measureText(name).width
-      drawFlag(ctx, r.flag, x + nw + 12, y - rowH * 0.15, rowH * 0.45, rowH * 0.3)
+      if (r.flag) drawFlag(ctx, r.flag, x + nw + 12, y - rowH * 0.15, rowH * 0.45, rowH * 0.3)
     }
     ctx.textAlign = 'right'
     ctx.font = FONT(rowH * 0.4)
@@ -509,6 +511,13 @@ export function paintBoard(kind, rows, footer, w = 768, h = 1024) {
     trophy(ctx, w - 70 - ctx.measureText(r.wins.toLocaleString('en-US')).width - 20, y, rowH * 0.36)
     ctx.textAlign = 'left'
   })
+  if (!rows.length && emptyText) {
+    ctx.fillStyle = '#8a93ad'
+    ctx.font = FONT(40, 600)
+    ctx.textAlign = 'center'
+    ctx.fillText(emptyText, w / 2, top + (h - top - 120) / 2)
+    ctx.textAlign = 'left'
+  }
   // footer
   ctx.fillStyle = '#1b2550'
   roundRect(ctx, 40, h - 108, w - 80, 66, 18)

@@ -34,7 +34,7 @@ import { createMatch } from './hub/match.js'
 import { createMenus } from './hub/menus.js'
 import { createAbilityScreen } from './hub/abilityScreen.js'
 import { addCash as grantCash, addXp, onChange, persist, save, tutorialFinished, xpForWin } from './progress.js'
-import { initNet, net } from './net.js'
+import { initNet, net, onServer } from './net.js'
 import { applyCueLook, cueById } from './cues.js'
 import { createRemotePlayers } from './remotePlayers.js'
 import { createEmoteMenu } from './hub/emotemenu.js'
@@ -136,6 +136,8 @@ const regionFlag = (() => {
 })()
 const me = { id: 'me', isPlayer: true, tag: save.tag, name: myName(), flag: regionFlag, rank: Math.min(8, Math.floor(save.wins / 5)), streak: save.streak, wins: save.wins, color: '#3dff8a', x: SPAWN.x, z: SPAWN.z, y: 0, zone: null }
 const boards = createBoards(layout.boardMats, regionFlag)
+// Top players + top countries from the game server (after the load, then every minute)
+onServer('leaderboard', (m) => boards.setData(m, save.wins))
 
 // --- Player avatar ----------------------------------------------------------
 const playerGroup = new Group()
