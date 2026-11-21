@@ -11,7 +11,7 @@
 import { Client } from '@colyseus/sdk'
 import { DAILY, DEV_MODE, ECONOMY, GIFTS, NET, SERVER_URL, TRACK } from './config.js'
 import { changed, hydrate, save, setClock, setPersistHook, settle, snapshot } from './progress.js'
-import { authState, canResolveServer, getPfp, launchRoomId, locateRoom, resolveServerEndpoint, subscribeAuth, updateRoom } from './bloxity.js'
+import { authState, canResolveServer, getPfp, getToken, launchRoomId, locateRoom, resolveServerEndpoint, subscribeAuth, updateRoom } from './bloxity.js'
 
 // net.daily = { unlocked, claimed, nextAt, track: { days, claimed } }
 // net.gifts = { secs, claimed, day, nextResetAt, at (performance.now() when secs was read) }
@@ -29,7 +29,9 @@ function storedId(key, make) {
 }
 const rand = () => Math.random().toString(36).slice(2, 8)
 const GUEST = storedId('crazy-8-ball.guest', () => `guest-${rand()}`)
-const DEV = DEV_MODE ? storedId('crazy-8-ball.dev', () => `dev-${rand()}`) : ''
+// Dev: `?dev=name` picks the identity, so two tabs of one browser can play each other.
+const devParam = DEV_MODE ? new URLSearchParams(location.search).get('dev')?.replace(/[^A-Za-z0-9]/g, '').slice(0, 12) : ''
+const DEV = DEV_MODE ? (devParam ? `dev-${devParam}` : storedId('crazy-8-ball.dev', () => `dev-${rand()}`)) : ''
 function identity() {
   if (DEV) return { userId: DEV, username: `Dev ${DEV.slice(4)}` }
   const u = authState.user
@@ -325,7 +327,8 @@ async function connect() {
   try {
     const id = identity()
     sentId = id.userId
-    const options = { ...id, pfp: getPfp(), loadout: { cue: save.cue, tag: save.tag } }
+    // token: the server verifies the Boxity identity itself (it never trusts userId on Boxity hosting)
+    const options = { ...id, token: getToken(), pfp: getPfp(), loadout: { cue: save.cue, tag: save.tag } }
     const { room, relay } = await joinAnyRoom(options)
     retryIn = NET.retry
     onlineSince = performance.now()
@@ -374,7 +377,8 @@ export function initNet() {
     serverSave() // under the old identity before switching
     net.hydrated = false
     sentId = id.userId
-    send('identify', { ...id, pfp: getPfp() })
+    // signing in mid-game: same connection, same room (never re-matchmade away from friends)
+    send('identify', { ...id, token: getToken(), pfp: getPfp() })
   })
   // dev mode has no Bloxity auth: connect right away
   if (DEV_MODE) connect()

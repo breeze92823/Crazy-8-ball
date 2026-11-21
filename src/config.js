@@ -67,19 +67,9 @@ export const PAD = {
   cardRange: 9, // m: the floating table card shows for the nearest table within this
   arrowRange: 15, // m: JOIN arrows float over open pads this close
 }
-export const LOBBY = {
-  countdown: 3, // s from a full table to the match
-  botFillDelay: [3, 7], // s before a bot walks over to fill the player's table
-  playTime: [55, 110], // s a bot match lasts at most
-  shotGap: [2.2, 4.5], // s between bot shots
-  botWait: [18, 40], // s a bot waits on a pad before giving up
-}
+// Lobbies run on the server (backend tables.ts: TABLE_TEAMS, TABLE_COUNTDOWN_MS): every seat is a real player.
+// Default looks for players without a Bloxity avatar (remotePlayers.js), picked per session.
 export const BOTS = {
-  count: 14,
-  walkSpeed: 4.2,
-  emoteChance: 0.06, // per second, while idling (emotes.js BOT_IDLE_EMOTES)
-  names: ['cue_master77', 'PixelShark', 'nightowl_zz', 'Bankshot_Bea', 'luckylark09', 'MochiRolls', 'tofu_tactics', 'ZenBreaker', 'sk8rmilo', 'EightBallEli', 'chalkydust', 'RailRunner_x', 'KiwiKai', 'spinDoctor22', 'MintyMarlo', 'corner_pocket'],
-  flags: ['PH', 'US', 'BR', 'ID', 'TH', 'MY', 'MX', 'GB', 'IN', 'JP', 'DE', 'FR', 'CA', 'VN', 'ES', 'KR', 'LK', 'PL'],
   shirts: ['#1d1d22', '#e94f37', '#3a86ff', '#ffbe0b', '#8338ec', '#2ec4b6', '#f4f1de', '#ff70a6', '#38b000', '#6c757d'],
   pants: ['#1b1b1f', '#2b2d42', '#3d405b', '#5c4033', '#264653'],
   hair: ['#2b1b12', '#4a2f1c', '#c96a2a', '#e8c070', '#111111', '#7a4b2a'],
@@ -128,9 +118,9 @@ export const RANKED = {
 }
 // The player's match (hub/match.js)
 export const MATCH = {
-  shotClock: 30, // s per shot before it counts as a foul
+  shotClock: 30, // s per shot before it counts as a foul (the server's backstop is TURN_MS 50 s)
+  tutorClock: 40, // s per shot while the first-match tutorial runs
   minSpeed: 0.8, maxSpeed: 7, // m/s cue ball speed at no / full power
-  aiSkill: 0.72, aiThink: [1.0, 2.2],
   fineAim: 0.35, // rad/s with the fine-aim buttons / A-D keys
   fov: 34, // narrow top-down lens so the players round the table don't loom
   aimFov: 55, // behind-the-cue camera
@@ -283,11 +273,13 @@ export const CAMERA = {
 // --- Bloxity (bloxity.js, avatar/) -------------------------------------------------
 // SDK setting keys this game listens for; registering a listener makes the control
 // appear in the portal's settings menu.
+// Every key listened to (bloxity.js) is enabled in Boxity's menu; values arrive as strings.
 export const SETTINGS = {
+  master_volume: { def: '80', type: 'number', min: 0, max: 100 },
+  music_volume: { def: '80', type: 'number', min: 0, max: 100 },
   graphics_quality: { def: DEFAULT_GRAPHICS, type: 'enum', values: ['Low', 'Medium', 'High', 'Ultra'] },
   camera_sensitivity: { def: '1', type: 'number', min: 0.1, max: 5 },
   show_fps: { def: 'false', type: 'bool' },
-  fullscreen: { def: 'false', type: 'bool' },
 }
 
 // The base rig, measured from player.glb: origin at the feet, 6.4 units tall at bind pose.
@@ -390,8 +382,9 @@ export function coerceSetting(key, raw) {
 export const AUDIO = {
   volume: 0.8,
   storageKey: 'crazy-8-ball.sound',
-  buses: { ui: 0.75, sfx: 0.9, amb: 0.6, engine: 0.5 }, // per-bus levels before the master
+  buses: { ui: 0.75, sfx: 0.9, amb: 0.6, engine: 0.5, music: 1 }, // per-bus levels before the master
   duck: 0.45, // world (ambience) level while a menu window is open
+  musicDuck: 0.75, // background music level while a menu window is open
   maxVoices: 56,
   maxVoicesTouch: 28,
   latency: 0.04,
@@ -402,6 +395,11 @@ export const AUDIO = {
   // Positional one-shots: full level within near m, silent past far m.
   near: 3, far: 34,
   // ambience.js: scheduler tick s, wind / city levels, bird and horn gaps (s), fire + piano reach (m)
-  ambience: { tick: 0.25, wind: 0.16, city: 0.12, birdEvery: [5, 14], hornEvery: [16, 40], fire: 0.5, fireNear: 10, piano: 0.32, pianoNear: 16, chimeEvery: [9, 22] },
+  // Wind and city sit well under the music: a soft bed, not a hiss.
+  ambience: { tick: 0.25, wind: 0.05, gust: [0.75, 1.25], windBand: [280, 560], city: 0.07, birdEvery: [6, 16], hornEvery: [30, 70], fire: 0.5, fireNear: 10, piano: 0.32, pianoNear: 16, chimeEvery: [12, 28] },
+  // music.js: calm generative background music. bpm, level in a match, how much it steps
+  // back next to the lounge piano (so the two never play over each other), and the bus
+  // filters that keep it warm (nothing harsh up top, no mud at the bottom).
+  music: { bpm: 70, inMatch: 0.7, pianoDuck: 0.9, lowCut: 70, highCut: 3200, echo: 0.24, fadeIn: 6 },
   steps: { stride: 1.35 }, // m walked per footstep
 }

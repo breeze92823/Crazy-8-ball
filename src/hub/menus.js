@@ -143,6 +143,7 @@ export function createMenus({ onOpen, inMatch }) {
     current = key
     overlay.classList.add('open')
     root.classList.add('win-open')
+    fitHotbar()
     win.className = `mn-win w-${key}`
     collected.classList.toggle('hidden', key !== 'cues' && key !== 'index')
     if (document.pointerLockElement) document.exitPointerLock?.()
@@ -155,6 +156,7 @@ export function createMenus({ onOpen, inMatch }) {
     current = null
     overlay.classList.remove('open')
     root.classList.remove('win-open')
+    fitHotbar()
     sfx.panel(false)
     onOpen?.(false)
   }
@@ -497,7 +499,85 @@ export function createMenus({ onOpen, inMatch }) {
     const items = save.hotbar.map((u) => save.bag.find((b) => b.uid === u)).filter(Boolean)
     hotbar.innerHTML = items.map(slot).join('') + `<button class="hs bagb" aria-label="Bag">${I.bag}${save.bag.length ? `<i class="cnt">${save.bag.length}</i>` : ''}</button>`
     document.body.classList.add('has-hotbar')
+    requestAnimationFrame(fitHotbar)
   }
+
+  // Keeps the hotbar clear of the rest of the HUD. The touch jump / run / cam cluster can't move, so
+  // the slots shrink to fit beside it, or the bar lifts above it when even small slots don't fit
+  // (portrait phones). The cash pill (left), EMOTE (right) and the lobby bar / Leave (centre) can
+  // move, so they get pushed above the bar via body vars (hud.css, emotemenu.css) when they'd overlap.
+  const fitVals = {}
+  const setVar = (node, k, v) => {
+    if (fitVals[k] === v) return
+    fitVals[k] = v
+    node.style.setProperty(k, v)
+  }
+  function fitHotbar() {
+    const bs = document.body
+    const n = hotbar.children.length
+    if (!n || root.classList.contains('in-match') || root.classList.contains('win-open')) {
+      for (const k of ['--hot-top', '--hot-push-l', '--hot-push-r']) setVar(bs, k, '0px')
+      return
+    }
+    const vw = innerWidth
+    const vh = innerHeight
+    const vmin = Math.min(vw, vh)
+    const touch = bs.classList.contains('touch-ui')
+    const edge = Math.min(20, Math.max(10, vmin * 0.02))
+    const pref = Math.min(72, Math.max(56, vmin * 0.08))
+    const MIN = 44 // tap target
+    const blocks = [...hotbar.children].filter((b) => !b.classList.contains('bagb'))
+    const box = (sel) => {
+      const r = document.querySelector(sel)?.getBoundingClientRect()
+      return r && r.width ? r : null
+    }
+    // how far in from its own side of the screen a box reaches
+    const reach = (r) => (r.left + r.right < vw ? r.right : vw - r.left)
+    // slot size for a centred bar of k blocks + the bag that keeps `inset` px clear on both sides
+    const size = (inset, k, g) => Math.floor(Math.min(pref, (vw - 2 * inset - k * g) / (k + 1)))
+    // how many blocks still fit at MIN
+    const most = (inset, g) => Math.max(0, Math.min(blocks.length, Math.floor((vw - 2 * inset + g) / (MIN + g)) - 1))
+    const base = vh - hotbar.getBoundingClientRect().bottom - (parseFloat(fitVals['--hot-lift']) || 0)
+    const cluster = touch ? box('.touch-cluster') : null
+    const cash = box('#hud .hud-bl')
+    const emote = box('#emote-ui:not(.hidden) .em-btn')
+    const fixedIn = Math.max(edge, cluster ? reach(cluster) + 10 : 0)
+    // on desktop the cash pill and EMOTE share the bottom row with the bar; on touch they sit higher
+    const side = touch ? [] : [cash, emote].filter(Boolean)
+    let gap = touch ? 6 : 8
+    let k = blocks.length
+    let s = size(Math.max(fixedIn, ...side.map((r) => reach(r) + 10)), k, gap)
+    let lift = 0
+    let pushAll = false
+    if (s < Math.min(pref, 50)) {
+      // too tight beside everything: keep only the fixed controls clear and push the movable HUD up
+      s = size(fixedIn, k, gap)
+      if (s < MIN && cluster && vh > vw) {
+        // portrait phone, no room beside the touch controls: go full width just above them
+        lift = Math.max(0, vh - cluster.top + 8 - base)
+        gap = 5
+        k = Math.min(k, most(edge, gap))
+        s = size(edge, k, gap)
+        pushAll = true
+      } else if (s < MIN) {
+        // short landscape: stay on the bottom row and show only the blocks that fit (the rest are in the Bag)
+        k = most(fixedIn, gap)
+        s = size(fixedIn, k, gap)
+      }
+    }
+    blocks.forEach((b, i) => b.classList.toggle('off', i >= k))
+    const w = (k + 1) * s + k * gap
+    const top = Math.round(base + lift + s + 16) // room for the ready pulse and the coin hanging under the cash pill
+    const hits = (r) => r && (pushAll || (!touch && r.right > (vw - w) / 2 - 6 && r.left < (vw + w) / 2 + 6))
+    setVar(hotbar, '--hs', `${s}px`)
+    setVar(hotbar, '--hot-gap', `${gap}px`)
+    setVar(hotbar, '--hot-lift', `${Math.round(lift)}px`)
+    setVar(bs, '--hot-top', `${top}px`)
+    setVar(bs, '--hot-push-l', hits(cash) ? `${top}px` : '0px')
+    setVar(bs, '--hot-push-r', hits(emote) ? `${top}px` : '0px')
+  }
+  addEventListener('resize', fitHotbar)
+  new MutationObserver(fitHotbar).observe(document.body, { attributes: true, attributeFilter: ['class'] })
   hotbar.addEventListener('click', (e) => {
     const b = e.target.closest('.hs')
     if (!b) return
@@ -675,12 +755,14 @@ export function createMenus({ onOpen, inMatch }) {
       if (m !== wasMatch) {
         wasMatch = m
         root.classList.toggle('in-match', m)
+        fitHotbar()
         if (m) close()
       }
       tickAcc += dt
       if (tickAcc < 0.5) return
       tickAcc = 0
       updateDots()
+      fitHotbar() // the cash pill grows with the balance; EMOTE / touch controls come and go
       // live countdowns
       const t = now()
       root.querySelectorAll('[data-ready]').forEach((n) => {

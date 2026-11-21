@@ -5,12 +5,16 @@
 // Graph:  ui ─────────────────────────────┐
 //         sfx ──┬──────────────────────────┤
 //               └─ reverb send ─ convolver ┤
-//         world (duck) ─┬─ amb ────────────┼─ master ─ glue comp ─ limiter ─ out
-//                       └─ engine ─────────┘
+//         world (duck) ─┬─ amb ────────────┼─ master ─ glue comp ─ limiter ─ soft clip ─ out
+//                       └─ engine ─────────┤
+//         music ─ low cut ─ high cut ──────┘   (music.js; its own echo, no rooftop reverb)
 // `world` dips while a menu window is open so the UI sits on top of the scene.
 // The reverb is a generated impulse response: a few early reflections (the
 // cliffs and stalls) and a short, darkening tail, so one-shots sit in the beach
 // instead of sounding pasted on top of it.
+// The soft clip at the very end is a safety net: perfectly linear below -2.5 dB and a
+// smooth knee above it (4x oversampled, so no aliased fizz), so even a pile-up of
+// sounds can never hard-clip into crackle.
 import { AUDIO, COARSE_POINTER } from '../config.js'
 
 export const A = {
@@ -22,6 +26,8 @@ export const A = {
   world: null,
   amb: null,
   engine: null,
+  music: null, // background music bus (music.js); its gain is the player's music level
+  musicIn: null, // music voices connect here (ducked in menus, filtered)
   noise: {}, // white / pink / brown mono buffers, pinkStereo for beds
   voices: 0, // one-shot voices sounding now (see voice())
 }
@@ -42,7 +48,12 @@ try {
 } catch {
   // Storage blocked: unmuted.
 }
-const level = () => (muted ? 0 : volume * volume) // perceptual: the slider feels even
+let adBreak = false // a Boxity ad is playing over the game: silent until it ends
+const level = () => (muted || adBreak ? 0 : volume * volume) // perceptual: the slider feels even
+export function setAdBreak(on) {
+  adBreak = !!on
+  applyLevel(0.02)
+}
 function applyLevel(t = 0.05) {
   if (A.master) A.master.gain.setTargetAtTime(level(), A.ctx.currentTime, t)
 }
@@ -95,6 +106,19 @@ function makeNoise(ctx, seconds, kind, channels = 1) {
     }
   }
   return buf
+}
+
+// Output safety curve: identity up to K, then a tanh knee that tops out below full scale.
+function softClip() {
+  const n = 4096
+  const K = 0.75
+  const c = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1
+    const ax = Math.abs(x)
+    c[i] = ax <= K ? x : Math.sign(x) * (K + (1 - K) * Math.tanh((ax - K) / (1 - K)))
+  }
+  return c
 }
 
 // Stereo impulse response: pre-delay, sparse early reflections, then a noise
@@ -163,9 +187,12 @@ function buildGraph() {
   limit.ratio.value = 20
   limit.attack.value = 0.002
   limit.release.value = 0.1
+  const clip = ctx.createWaveShaper()
+  clip.curve = softClip()
+  clip.oversample = '4x'
   const master = ctx.createGain()
   master.gain.value = 0
-  master.connect(glue).connect(limit).connect(ctx.destination)
+  master.connect(glue).connect(limit).connect(clip).connect(ctx.destination)
 
   const bus = (gain, to = master) => {
     const g = ctx.createGain()
@@ -178,6 +205,19 @@ function buildGraph() {
   A.world = bus(ducked ? AUDIO.duck : 1)
   A.amb = bus(AUDIO.buses.amb, A.world)
   A.engine = bus(AUDIO.buses.engine, A.world)
+  // music: level (settings) -> menu duck -> warm band (no rumble, nothing piercing)
+  const M = AUDIO.music
+  const lowCut = ctx.createBiquadFilter()
+  lowCut.type = 'highpass'
+  lowCut.frequency.value = M.lowCut
+  lowCut.Q.value = 0.6
+  const highCut = ctx.createBiquadFilter()
+  highCut.type = 'lowpass'
+  highCut.frequency.value = M.highCut
+  highCut.Q.value = 0.5
+  lowCut.connect(highCut).connect(master)
+  A.music = bus(AUDIO.buses.music, lowCut)
+  A.musicIn = bus(ducked ? AUDIO.musicDuck : 1, A.music)
   const conv = ctx.createConvolver()
   conv.buffer = makeImpulse(ctx)
   A.verb = ctx.createGain()
@@ -229,6 +269,7 @@ export function setDucked(on) {
   if (on === ducked) return
   ducked = on
   if (A.world) A.world.gain.setTargetAtTime(on ? AUDIO.duck : 1, A.ctx.currentTime, 0.12)
+  if (A.musicIn) A.musicIn.gain.setTargetAtTime(on ? AUDIO.musicDuck : 1, A.ctx.currentTime, 0.25)
 }
 
 // One-shot voice budget: a burst of rewards on a weak phone skips the extras

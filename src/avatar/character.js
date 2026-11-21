@@ -139,25 +139,52 @@ let basePromise = null
 export async function loadBaseCharacter() {
   try {
     basePromise ||= new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}avatars/player.glb`)
-    const gltf = await basePromise
-    const root = cloneSkeleton(gltf.scene)
-    root.name = 'character'
-    root.traverse((o) => {
-      if (o.isMesh || o.isSkinnedMesh) {
-        o.castShadow = true
-        o.frustumCulled = false
-      }
-    })
-    root.animations = gltf.animations || []
-    root.nodes = {}
-    root.traverse((o) => {
-      if (o.name) root.nodes[o.name] = o
-    })
-    root.scale.setScalar(PLAYER_DIMS.height / RIG_HEIGHT)
-    return root
+    return fromGltf(await basePromise)
   } catch (err) {
     basePromise = null
     console.warn('[defaultCharacter] player.glb failed to load, using procedural character', err)
     return buildDefaultCharacter()
   }
+}
+
+// A player's custom Boxity character (avatar.getCharacterFor: same 22 bones, names and rest
+// rotations as player.glb, its texture embedded). Cached per URL; null when it fails to load,
+// and the caller draws the regular avatar instead (never hides the player).
+const customs = new Map()
+export async function loadCustomCharacter(url) {
+  try {
+    if (!customs.has(url)) customs.set(url, new GLTFLoader().loadAsync(url))
+    const root = fromGltf(await customs.get(url))
+    root.userData.custom = true
+    return root
+  } catch (err) {
+    customs.delete(url)
+    console.warn('[customCharacter] failed to load', url, err)
+    return null
+  }
+}
+
+// One rig clone, named nodes in `nodes`, each node's rest transform in model space in
+// userData.rest (accessories authored in the rest pose are placed with its inverse, loader.js),
+// then scaled from rig units to metres.
+function fromGltf(gltf) {
+  const root = cloneSkeleton(gltf.scene)
+  root.name = 'character'
+  root.traverse((o) => {
+    if (o.isMesh || o.isSkinnedMesh) {
+      o.castShadow = true
+      o.frustumCulled = false
+    }
+  })
+  root.animations = gltf.animations || []
+  root.nodes = {}
+  root.traverse((o) => {
+    if (o.name) root.nodes[o.name] = o
+  })
+  root.updateMatrixWorld(true)
+  const toModel = root.matrixWorld.clone().invert()
+  root.userData.rest = new Map()
+  for (const [name, node] of Object.entries(root.nodes)) root.userData.rest.set(name, toModel.clone().multiply(node.matrixWorld))
+  root.scale.setScalar(PLAYER_DIMS.height / RIG_HEIGHT)
+  return root
 }

@@ -6,9 +6,11 @@ import { AUDIO } from '../config.js'
 import { A, installAudio as installCore, isMuted, setMuted, setVolume, toggleMuted } from './core.js'
 import * as sfx from './sfx.js'
 import * as ambience from './ambience.js'
+import * as music from './music.js'
 
 export { sfx, setVolume, setMuted, isMuted, toggleMuted }
 export const updateAmbience = ambience.update
+export const updateMusic = music.update
 export const audioReady = () => !!A.master
 
 const listener = { x: 0, z: 0, yaw: 0 }

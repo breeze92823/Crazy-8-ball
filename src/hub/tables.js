@@ -1,9 +1,9 @@
 // The pool tables of the hub: their models, the glowing join pads beside them,
 // the balls (instanced, one InstancedMesh per ball number across all tables)
 // and each table's lobby state:
-//   open -> waiting (someone on a pad) -> countdown (full) -> playing (bots) | match (the player)
-//   -> cooldown -> open
-// Bot games are simulated for real (tablesim.js) so balls roll, clack and drop.
+//   open -> waiting (someone on a pad) -> countdown (full) -> match -> cooldown -> open
+// Every seat is a real player: the server runs the lobbies (backend tables.ts) and
+// tablenet.js mirrors them here (setMembers / setState); offline a pad only seats you.
 import {
   AdditiveBlending,
   CanvasTexture,
@@ -22,15 +22,14 @@ import {
   SRGBColorSpace,
   Vector3,
 } from 'three'
-import { LOBBY, PAD, TABLE, TABLE_GRID, TABLE_MODES } from '../config.js'
+import { PAD, TABLE, TABLE_GRID, TABLE_MODES } from '../config.js'
 import { bake } from '../bake.js'
 import { label, neon, solidBox } from '../propkit.js'
 import { blockRect } from './nav.js'
 import { drawPadDecal, paintBadge, paintBall, paintOutline, tex } from './paint.js'
 import { TABLE_BED_Y, buildCue, buildPoolTable } from './props.js'
-import { createSim, pickShot } from './tablesim.js'
+import { createSim } from './tablesim.js'
 
-const rnd = (a, b) => a + Math.random() * (b - a)
 const OUTLINE = paintOutline()
 
 export function createTables(scene) {
@@ -57,10 +56,7 @@ export function createTables(scene) {
         timer: 0,
         zones: [],
         sim: createSim(),
-        turn: 0, // team to shoot
-        shotTimer: 0,
-        aim: null, // { angle, speed, t, shooter }
-        playTime: 0,
+        aim: null, // { angle, speed, t, shooter } while a shot is struck
         dirty: true, // balls need redraw
         padKey: '',
       }
@@ -188,6 +184,7 @@ export function createTables(scene) {
     const t = zone.table
     return (t.state === 'open' || t.state === 'waiting' || t.state === 'countdown') && zone.members.length < zone.cap
   }
+  // Local seat (offline, and the moment before the server confirms one).
   function join(zone, e) {
     if (!canJoin(zone) || e.zone) return false
     zone.members.push(e)
@@ -195,11 +192,6 @@ export function createTables(scene) {
     const t = zone.table
     if (!t.host) t.host = e
     if (t.state === 'open') t.state = 'waiting'
-    if (members(t) >= t.cap) {
-      t.state = 'countdown'
-      t.timer = LOBBY.countdown
-      emit('countdown', t)
-    }
     emit('join', { table: t, entity: e })
     return true
   }
@@ -210,95 +202,40 @@ export function createTables(scene) {
     zone.members.splice(zone.members.indexOf(e), 1)
     const t = zone.table
     if (t.host === e) t.host = all(t)[0] ?? null
-    if (t.state === 'countdown') t.state = 'waiting'
     if ((t.state === 'waiting' || t.state === 'countdown') && members(t) === 0) t.state = 'open'
     emit('leave', { table: t, entity: e })
   }
-  function finish(t, winnerTeam) {
-    t.state = 'cooldown'
-    t.timer = 3
-    t.cue.visible = false
-    t.aim = null
-    emit('end', { table: t, winnerTeam, winners: all(t).filter((e) => teamOf(t, e) === winnerTeam) })
-  }
-  function reset(t) {
-    for (const e of all(t)) e.zone = null
+  // The server's seats: teams = [[entity], [entity]] (1v1: both on the one pad, team 0 first).
+  // Emits 'join' for each newcomer.
+  function setMembers(t, teams) {
+    const before = new Set(all(t))
+    for (const e of before) if (e.zone?.table === t) e.zone = null
     for (const z of t.zones) z.members.length = 0
-    t.host = null
-    t.state = 'open'
-    t.sim.rack()
-    t.dirty = true
+    teams.forEach((team, i) => {
+      const zone = t.team === 1 ? t.zones[0] : t.zones[i]
+      for (const e of team) {
+        if (e.zone && e.zone.table !== t) leave(e)
+        zone.members.push(e)
+        e.zone = zone
+      }
+    })
+    const now = all(t)
+    t.host = now[0] ?? null
+    for (const e of now) if (!before.has(e)) emit('join', { table: t, entity: e })
+  }
+  // The server's lobby state; timer = s left of a countdown / cooldown. Emits 'countdown'.
+  function setState(t, state, timer = 0) {
+    t.timer = timer
+    if (state === t.state) return
+    const was = t.state
+    t.state = state
+    if (state === 'countdown') emit('countdown', t)
+    if (state === 'open' && was !== 'open') {
+      t.cue.visible = false
+      t.aim = null
+    }
   }
 
-  // --- bot games ---
-  const legalFor = (t) => (n) => {
-    if (n !== 8) return true
-    return t.sim.balls.every((b) => b.n === 0 || b.n === 8 || !b.on)
-  }
-  function shooterFor(t) {
-    const team = all(t).filter((e) => teamOf(t, e) === t.turn)
-    return team.length ? team[Math.floor(Math.random() * team.length)] : null
-  }
-  // Where a shooter stands: back along the shot line, just outside the rail.
-  const stance = (t, angle) => {
-    const c = t.sim.balls[0]
-    const dx = -Math.cos(angle)
-    const dz = -Math.sin(angle)
-    const ex = (TABLE.length / 2 + 0.55 - Math.sign(dx) * c.x) / Math.max(1e-3, Math.abs(dx))
-    const ez = (TABLE.width / 2 + 0.55 - Math.sign(dz) * c.z) / Math.max(1e-3, Math.abs(dz))
-    const k = Math.min(ex, ez)
-    return { x: t.x + c.x + dx * k, z: t.z + c.z + dz * k, facing: Math.atan2(-dx, -dz) }
-  }
-  function startPlaying(t) {
-    t.state = 'playing'
-    t.playTime = rnd(...LOBBY.playTime)
-    t.turn = Math.floor(Math.random() * 2)
-    t.shotTimer = 1.5
-    t.sim.rack()
-    t.dirty = true
-    emit('start', t)
-  }
-  function updateGame(t, dt) {
-    const sim = t.sim
-    t.playTime -= dt
-    if (sim.moving()) return
-    if (t.aim) {
-      // the cue draws back, then strikes
-      t.aim.t += dt
-      placeCue(t, t.aim.angle, t.aim.t < 0.7 ? 0.08 + t.aim.t * 0.28 : Math.max(0.02, 0.28 - (t.aim.t - 0.7) * 3))
-      if (t.aim.t >= 0.78) {
-        sim.shoot(t.aim.angle, t.aim.speed)
-        t.cue.visible = false
-        t.lastShooter = t.aim.shooter
-        t.aim = null
-        t.resolving = true
-      }
-      return
-    }
-    if (t.resolving) {
-      t.resolving = false
-      // shot over: respot a scratched cue ball, keep the turn on a pot
-      const potted = sim.sunkThisShot.filter((n) => n !== 0)
-      if (!sim.balls[0].on) sim.placeCue(-TABLE.bedL / 4, 0)
-      if (potted.includes(8)) {
-        const clean = sim.balls.every((b) => b.n === 0 || !b.on)
-        return finish(t, clean ? t.turn : 1 - t.turn)
-      }
-      if (potted.length) emit('pot', { table: t, shooter: t.lastShooter, balls: potted })
-      else t.turn = 1 - t.turn
-      t.shotTimer = rnd(...LOBBY.shotGap)
-      if (t.playTime <= 0) return finish(t, Math.random() < 0.5 ? 0 : 1)
-    }
-    t.shotTimer -= dt
-    if (t.shotTimer > 0) return
-    const shooter = shooterFor(t)
-    if (!shooter) return finish(t, 1 - t.turn)
-    const shot = pickShot(sim, legalFor(t), 0.55 + Math.random() * 0.3)
-    t.aim = { angle: shot.angle, speed: shot.speed, t: 0, shooter }
-    const st = stance(t, shot.angle)
-    shooter.stance?.(st.x, st.z, st.facing)
-    t.cue.visible = true
-  }
   // Cue along the shot line, tip `gap` m behind the cue ball.
   const up = new Vector3(0, 1, 0)
   const dir = new Vector3()
@@ -313,7 +250,7 @@ export function createTables(scene) {
   // --- pad visuals ---
   const cols = { open: new Color(PAD.open), mine: new Color(PAD.mine), playing: new Color(PAD.playing) }
   function refreshPad(t, me) {
-    const playing = t.state === 'playing' || t.state === 'match' || t.state === 'cooldown'
+    const playing = t.state === 'match' || t.state === 'cooldown'
     const key = `${t.state}|${t.zones.map((z) => z.members.length).join(',')}|${me?.zone?.table === t}`
     if (key === t.padKey) return
     t.padKey = key
@@ -334,21 +271,8 @@ export function createTables(scene) {
   const sounds = [] // reused event buffer
   function update(dt, elapsed, me) {
     for (const t of tables) {
-      if (t.state === 'countdown') {
-        t.timer -= dt
-        if (t.timer <= 0) {
-          if (all(t).some((e) => e.isPlayer)) {
-            t.state = 'match'
-            emit('match', t)
-          } else startPlaying(t)
-        }
-      } else if (t.state === 'playing') updateGame(t, dt)
-      else if (t.state === 'cooldown') {
-        t.timer -= dt
-        if (t.timer <= 0) reset(t)
-      }
-      if (t.state === 'playing' || t.state === 'match' || t.dirty) {
-        if (t.state === 'playing') t.sim.step(dt)
+      if (t.state === 'countdown' || t.state === 'cooldown') t.timer = Math.max(0, t.timer - dt)
+      if (t.state === 'match' || t.state === 'cooldown' || t.dirty) {
         for (const b of t.sim.balls) if (!b.on) b.sunk += dt
         drawBalls(t)
         t.dirty = false
@@ -363,7 +287,7 @@ export function createTables(scene) {
         zone.rings.forEach((r, i) => {
           const k = (elapsed * 0.45 + i / 3) % 1
           r.position.y = 0.04 + k * 0.6
-          r.material.opacity = (1 - k) * (t.state === 'playing' ? 0.45 : 0.85)
+          r.material.opacity = (1 - k) * (t.state === 'match' ? 0.45 : 0.85)
         })
         const near = me && Math.hypot(me.x - zone.x, me.z - zone.z) < PAD.arrowRange
         zone.arrow.visible = !!near && canJoin(zone) && me.zone !== zone && !me.zone
@@ -385,10 +309,11 @@ export function createTables(scene) {
     canJoin,
     join,
     leave,
+    setMembers,
+    setState,
     members,
     all,
     teamOf,
-    finish,
     placeCue,
     on: (fn) => listeners.push(fn),
     update,

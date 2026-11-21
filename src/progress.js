@@ -9,7 +9,7 @@ import { BAG, BONUS, ECONOMY, RANKED, STARTER } from './config.js'
 import { BLOCKS, CUE_BY_ID, DEFAULT_CUE, RARITIES, rollBlock, rollRarity } from './cues.js'
 
 const SETTINGS_KEY = `${ECONOMY.storageKey}.settings`
-const DEF_SETTINGS = { sfx: 0.8, ambience: 0.8, piano: true, guide: true, tags: true, night: false }
+const DEF_SETTINGS = { sfx: 0.8, music: 0.7, ambience: 0.8, piano: true, guide: true, tags: true, night: false }
 const fresh = () => ({
   cash: ECONOMY.startCash, wins: 0, streak: 0, tutorialDone: false, ability: 0, abilityHintDone: false,
   xp: 0, rankClaimed: 0, tag: '', cues: { [DEFAULT_CUE]: 1 }, cue: DEFAULT_CUE, bag: [], hotbar: [], perks: [], playtime: 0,

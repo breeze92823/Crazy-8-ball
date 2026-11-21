@@ -122,10 +122,15 @@
 .hud-bl {
   position: absolute;
   left: calc(var(--edge) + env(safe-area-inset-left, 0px));
-  bottom: calc(var(--edge) + env(safe-area-inset-bottom, 0px));
+  /* --hot-push-l / --hot-top (body, set by menus.js fitHotbar) lift HUD that would sit under the hotbar */
+  bottom: max(calc(var(--edge) + env(safe-area-inset-bottom, 0px)), var(--hot-push-l, 0px));
   display: flex; align-items: flex-end; gap: 10px;
 }
-.touch-ui .hud-bl { bottom: calc(46vmin + env(safe-area-inset-bottom, 0px)); }
+.touch-ui .hud-bl { bottom: max(calc(46vmin + env(safe-area-inset-bottom, 0px)), var(--hot-push-l, 0px)); }
+/* touch landscape: the pill sits beside the left menu buttons, not on top of Rewards / Ranked */
+@media (orientation: landscape) {
+  body.touch-ui:not(.in-match) .hud-bl { left: calc(var(--edge) + env(safe-area-inset-left, 0px) + clamp(56px, 8.5vmin, 76px) + 18px); }
+}
 .hud-cash {
   display: flex; align-items: center;
   height: 44px; padding: 0 16px 0 52px; position: relative;
@@ -143,7 +148,7 @@
 /* leave button */
 .hud-leave {
   position: absolute; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--edge) + env(safe-area-inset-bottom, 0px) + 6px);
+  bottom: max(calc(var(--edge) + env(safe-area-inset-bottom, 0px) + 6px), var(--hot-top, 0px));
   min-height: 52px; padding: 0 28px;
   border-radius: 18px; border: 3px solid #14163a;
   background: linear-gradient(180deg, #ff6b6b, #e03131);
@@ -151,7 +156,7 @@
   font-size: 22px; font-weight: 700; color: #fff;
 }
 .hud-leave:active { transform: translateX(-50%) translateY(3px); box-shadow: 0 2px 0 #8a1d1d; }
-.touch-ui .hud-leave { bottom: calc(34vmin + env(safe-area-inset-bottom, 0px)); }
+.touch-ui .hud-leave { bottom: max(calc(34vmin + env(safe-area-inset-bottom, 0px)), var(--hot-top, 0px)); }
 
 /* world-anchored layers */
 /* z-index 0: its own stack, so name tags never draw over the Players panel (.hud-tr) */
@@ -247,7 +252,7 @@
 /* lobby bar (on a pad) */
 .hud-lobby {
   position: absolute; left: 50%; transform: translateX(-50%);
-  bottom: calc(env(safe-area-inset-bottom, 0px) + clamp(12px, 2.4vmin, 24px));
+  bottom: max(calc(env(safe-area-inset-bottom, 0px) + clamp(12px, 2.4vmin, 24px)), var(--hot-top, 0px));
   display: flex; align-items: center; gap: 10px; padding: 5px 22px 5px 6px; min-width: min(90vw, 460px);
   background: linear-gradient(180deg, #ffffff, #e6eefb); border: 3px solid #14163a; border-radius: 999px;
   color: #14163a; font-weight: 700; font-size: clamp(16px, 2.6vmin, 24px); box-shadow: 0 4px 0 rgba(20, 22, 58, 0.4);
@@ -262,10 +267,19 @@
 .hud-lobby.bump .lb-text { animation: lbbump 0.35s cubic-bezier(.2, 1.7, .4, 1); display: inline-block; }
 @keyframes lbbump { from { transform: scale(1.35); } }
 /* the Leave button sits just above the lobby bar while both show */
-.hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(env(safe-area-inset-bottom, 0px) + clamp(70px, 11vmin, 96px)); }
-.touch-ui .hud-lobby { bottom: calc(24vmin + env(safe-area-inset-bottom, 0px)); }
-.touch-ui .hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(34vmin + env(safe-area-inset-bottom, 0px)); }
+.hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(max(calc(env(safe-area-inset-bottom, 0px) + clamp(12px, 2.4vmin, 24px)), var(--hot-top, 0px)) + clamp(58px, 8.6vmin, 72px)); }
+.touch-ui .hud-lobby { bottom: max(calc(24vmin + env(safe-area-inset-bottom, 0px)), var(--hot-top, 0px)); }
+.touch-ui .hud-lobby:not(.hidden) ~ .hud-leave { bottom: calc(max(calc(24vmin + env(safe-area-inset-bottom, 0px)), var(--hot-top, 0px)) + clamp(58px, 10vmin, 72px)); }
 
 /* ranked chat tag on a name tag (menus.js Ranked rewards) */
 .tag-ct { color: #ffb347; margin-right: 4px; font-weight: 700; }
 .tag-ct.hidden { display: none; }
+
+/* Boxity chat over a player's head (bloxity.js onChat -> main.js): white bubble, two lines at most, tail down */
+.tag-bubble { position: relative; max-width: min(46vw, 240px); margin-bottom: 8px; padding: 6px 11px; border-radius: 14px; background: #fff; color: #1c1d33; font: 600 clamp(12px, 1.6vmin, 15px) / 1.25 Fredoka, system-ui, sans-serif; white-space: normal; text-align: center; overflow-wrap: anywhere; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25); pointer-events: none; }
+.tag-bubble::after { content: ''; position: absolute; left: 50%; bottom: -6px; transform: translateX(-50%); border: 6px solid transparent; border-top-color: #fff; border-bottom: 0; }
+.tag-bubble span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tag.bubble-only .tag-row, .tag.bubble-only .tag-streak { display: none; }
+/* Boxity's Show FPS setting */
+.hud-fps { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 4px); transform: translateX(-50%); z-index: 40; color: #fff; font: 600 12px Fredoka, system-ui, sans-serif; pointer-events: none; }
+.hud-fps.hidden { display: none; }

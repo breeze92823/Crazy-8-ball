@@ -1,19 +1,30 @@
-// The player's match, played on the hub table they joined (everyone around sees
-// the balls move). Flow:
-//   table full -> "WHO BREAKS?" roulette -> turns -> result card.
+// The player's match against the real players seated at the hub table they joined
+// (everyone around sees the balls move). Flow:
+//   table full (server tables.ts) -> "WHO BREAKS?" roulette -> turns -> result card.
+// Whoever shoots runs the physics and the rules on their own client: mAim while aiming,
+// mShot on the strike, mBalls while the balls roll, mEnd with the outcome (next team, groups,
+// ball in hand, foul, winner). The server picks the next shooter and answers everyone mTurn,
+// which moves every client on (applyTurn). The others' shots are drawn by tablenet.js from that
+// stream; this module only shows them (banners, cards, clock, camera).
 // My turn: a 3D camera behind the cue ball (wheel / pinch zooms from low behind
 // the cue up to a high view), drag to turn the aim, pull the PULL bar (or hold
 // Space) and let go to shoot. Spin + cue elevation from the cue-ball widget,
-// fine aim toggle, ball in hand ("MOVE") after the opponent fouls. The opponent's
-// turn hands the camera back to the hub chase cam so you watch from the table.
+// fine aim toggle, ball in hand ("MOVE") after the opponent fouls. The others'
+// turns hand the camera back to the hub chase cam (an overview while their balls roll).
 // The first match is a guided tutorial (break, drag, zoom out, zoom in, shoot).
 // Potting your balls fills the ABILITY bar; at 100 % press G (or tap the ability
 // button) to use the equipped ability (Ability Spin screen; abilityPlay.js runs
 // all 15: Fire Shot, Eagle's Eye, Portals, Black Hole, ...). Most arm the next
-// shot; Look Over There! acts at once on the opponent's next shot.
-// 8-ball rules, simplified: open table after the break, first legal pot sets
-// solids/stripes, fouls (scratch, no hit, wrong ball first, shot clock) give
-// ball in hand, the 8 wins once your group is cleared (early = loss).
+// shot; Look Over There! makes the next opponent's shot go wild (sent with mEnd).
+// 8-ball rules (WPA-style, see resolve()): the breaker has ball in hand behind the
+// head string; a legal break pots a ball or drives 4 object balls to a cushion,
+// else the table is re-racked for the other team to break. Open table after the
+// break; the first legal pot sets solids/stripes. Fouls (scratch, no ball hit,
+// wrong ball first, no cushion after contact, shot clock) give the other team ball
+// in hand anywhere (behind the head string after a scratch on the break). Once a
+// team's group is cleared it must hit the 8 first and call its pocket (tap a pocket
+// marker; the guide's pocket is the default): the 8 in the called pocket wins, in
+// another pocket, early, or with a foul loses.
 // Rewards are cash only (ECONOMY), never premium currency.
 import {
   CanvasTexture,
@@ -42,7 +53,10 @@ import { ballColor } from './paint.js'
 import { applyCueLook } from '../cues.js'
 import { TABLE_BED_Y } from './props.js'
 import { BED, FOOT_SPOT, HEAD_SPOT, POCKETS, pickShot } from './tablesim.js'
-import { aimPose } from './bots.js'
+import { applyBalls, packBalls, packEvent } from './tablenet.js'
+import { net, onServer, request, sendServer } from '../net.js'
+import { adScreen, rewardedAvailable, showRewarded } from '../bloxity.js'
+import { aimPose } from './stance.js'
 import { createMatchFx } from './matchfx.js'
 import { TINT, createAbilityPlay } from './abilityPlay.js'
 import { equippedId } from './abilityStore.js'
@@ -75,7 +89,20 @@ const ICON = {
   fine: '<svg viewBox="0 0 32 24"><path d="M3 12h18M15 6l6 6-6 6M27 4v16" fill="none" stroke="#14163a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 }
 
-// --- portraits (top cards + roulette): a blocky avatar head painted per entity ----------
+// --- portraits (top cards + roulette): the player's Boxity profile picture (`e.pfp`), else a
+// blocky avatar head painted per entity (also when the picture fails to load) ------------------
+function setFace(img, e) {
+  const want = e?.pfp || portrait(e)
+  if (img.dataset.face === want) return
+  img.dataset.face = want
+  img.onerror = e?.pfp
+    ? () => {
+        img.onerror = null
+        img.src = portrait(e)
+      }
+    : null
+  img.src = want
+}
 const portraits = new Map()
 function portrait(e) {
   if (portraits.has(e)) return portraits.get(e)
@@ -178,7 +205,7 @@ function setStrip(m, ax, az, bx, bz, y = TABLE_BED_Y + 0.004) {
   return len
 }
 
-export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, persist, addCash, getMyGroup }) {
+export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, persist, addCash, getMyGroup, entityOf, mySid, forfeit }) {
   const endListeners = []
   const M = { active: false, table: null, freeCam: false, onEnd: (fn) => endListeners.push(fn) }
   const mfx = createMatchFx(scene, TABLE_BED_Y)
@@ -214,8 +241,24 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   let groups = [null, null]
   let breakShot = true
   let ballInHand = false
+  let kitchen = false // ball in hand only behind the head string (the break, a scratch on the break)
+  let callPocket = -1 // the pocket called for the 8 ball (0..5), mine or the shooter's (mAim k)
+  let callPicked = false // I tapped a pocket this turn (else the call follows the guide's pocket)
+  let shotPre = null // the table before my shot: { onEight, kitchen, call }
   let moveTimer = 0
-  let shooterIdx = [0, 0]
+  let grabbed = false // dragged the cue ball this turn (hides the hand hint on it)
+  // this match on the server: its id, the turn number, whose shot it is, the seated teams (sessionIds)
+  let matchId = 0
+  let seq = 0
+  let shooterSid = ''
+  let teams = [[], []]
+  let room = null // the server room the match runs in (losing it ends the match)
+  let distracted = false // Look Over There! hit me: my next shot goes wild
+  let oppDistracted = false // I used it: the next opponent's shot goes wild
+  let remoteAb = '' // the ability on the shot in flight of another player (its aura)
+  let sendAt = 0 // performance.now() of the last mAim / mBalls
+  let aimKey = ''
+  const outbox = [] // sound/fx events of my rolling shot, for the next mBalls
   let clock = 0
   let aim = 0
   let power = 0
@@ -229,8 +272,8 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   let elev = 0 // 0..1 cue elevation
   let zoom = 0.35
   let zoomTarget = 0.35
-  let aiTimer = 0
-  let pending = null // { angle, speed, t, fromPower, mine }
+  let aiTimer = 0 // s left of the pause after a foul
+  let pending = null // { angle, speed, t, fromPower, mods } my stroke
   let shotByMe = false
   let armed = '' // the ability armed for my next shot ('' = none)
   let shotAb = '' // the ability riding on the shot in flight
@@ -242,7 +285,6 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   let roulette = null
   let introTimer = 0
   let ability = clamp(save.ability ?? 0, 0, 100)
-  let oppCue = 'classic' // the opponent's cue look this match
   let tut = null // { step, t, drag }
   let matchTutorial = false
 
@@ -279,7 +321,9 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   ghost.rotation.x = -Math.PI / 2
   const handRing = new Mesh(new RingGeometry(R * 1.55, R * 1.85, 40), new MeshBasicMaterial({ color: '#4d7cff', transparent: true, depthWrite: false, side: DoubleSide }))
   handRing.rotation.x = -Math.PI / 2
-  const guide = [tubeL, tubeR, dash, objLine, cueLine, bounce, xA, xB, ghost, handRing]
+  // the head string, shown while the ball in hand must stay behind it
+  const headLine = makeStrip(new MeshBasicMaterial({ color: '#4d7cff', transparent: true, opacity: 0.85, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3 }), 0.012)
+  const guide = [tubeL, tubeR, dash, objLine, cueLine, bounce, xA, xB, ghost, handRing, headLine]
   for (const o of guide) {
     o.renderOrder = 9
     o.visible = false
@@ -320,7 +364,10 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     <div class="mt-tut hud-outline hidden"></div>
     <button class="mt-skip hud-outline hidden">Skip tutorial</button>
     <div class="mt-pocket hidden"></div>
+    <div class="mt-calls">${POCKETS.map((_, i) => `<button class="mt-call hidden" data-pk="${i}" aria-label="Call pocket ${i + 1}"><span>8</span></button>`).join('')}</div>
+    <div class="mt-callhint hud-outline hidden">${COARSE ? 'TAP' : 'CLICK'} A POCKET TO CALL THE 8</div>
     <div class="mt-movelbl hud-outline hidden">MOVE</div>
+    <div class="mt-hint-ball hidden"><div class="hand">${ICON.hand}</div></div>
     <div class="mt-hint-drag hidden"><div class="hand">${ICON.hand}</div></div>
     <div class="mt-hint-scroll hidden"><div class="mouse">${COARSE ? ICON.pinch : ICON.mouse}</div><div class="arrows">${COARSE ? '' : ICON.scroll}</div></div>
     <div class="mt-power" data-silent>
@@ -352,7 +399,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     </div></div>
     <div class="mt-roulette hidden"><div class="box"><h2>WHO BREAKS?</h2><div class="face"><img alt=""></div><div class="nm hud-outline"></div></div></div>
     <div class="mt-confirm hidden"><div class="box"><h3>Leave the match?</h3><p>Leaving now counts as a forfeit.</p><div class="btns"><button class="stay">Stay</button><button class="leave">Leave</button></div></div></div>
-    <div class="mt-result hidden"><div class="mt-res-card"><h2 class="hud-outline"></h2><div class="reward"></div><p></p><button>Continue</button></div></div>`
+    <div class="mt-result hidden"><div class="mt-res-card"><h2 class="hud-outline"></h2><div class="reward"></div><p></p><button class="mt-ad hidden"><span class="play">&#9654;</span><span class="tx"></span></button><button class="mt-continue">Continue</button></div></div>`
   document.body.appendChild(layer)
   const $ = (s) => layer.querySelector(s)
   const show = (el, on) => el.classList.toggle('hidden', !on)
@@ -368,7 +415,10 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     tut: $('.mt-tut'),
     skip: $('.mt-skip'),
     pocket: $('.mt-pocket'),
+    calls: [...layer.querySelectorAll('.mt-call')],
+    callHint: $('.mt-callhint'),
     moveLbl: $('.mt-movelbl'),
+    hintBall: $('.mt-hint-ball'),
     hintDrag: $('.mt-hint-drag'),
     hintScroll: $('.mt-hint-scroll'),
     power: $('.mt-power'),
@@ -463,14 +513,18 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   }
   const pointers = new Map()
   let drag = null // 'aim' | 'ball'
+  const grabOff = { x: 0, z: 0 }
   let pinchD = 0
   const myShot = () => phase === 'aim'
+  // Grab zone: a finger-sized circle round the ball on screen, at least ~2.5 ball radii when it looks big.
   function nearCueBall(x, y) {
     const c = sim.balls[0]
     const s = screenOf(t.x + c.x, BALL_Y, t.z + c.z)
     if (!s) return false
+    const e = screenOf(t.x + c.x, BALL_Y + R, t.z + c.z)
+    const rPx = e ? Math.hypot(e[0] - s[0], e[1] - s[1]) : 0
     const p = tablePoint(x, y)
-    return Math.hypot(s[0] - x, s[1] - y) < (COARSE ? 64 : 44) || (p && Math.hypot(p.x - c.x, p.z - c.z) < R * 2.6)
+    return Math.hypot(s[0] - x, s[1] - y) < Math.max(COARSE ? 72 : 56, rPx * 2.6) || (p && Math.hypot(p.x - c.x, p.z - c.z) < R * 3.2)
   }
   els.input.addEventListener('pointerdown', (e) => {
     if (!M.active || !myShot()) return
@@ -484,7 +538,13 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     }
     if (ballInHand && moveTimer > 0 && nearCueBall(e.clientX, e.clientY)) {
       drag = 'ball'
+      grabbed = true
       els.input.style.cursor = 'grabbing'
+      // keep the grab offset (the zone is wider than the ball), so a near miss doesn't make it jump
+      const p = tablePoint(e.clientX, e.clientY)
+      const c = sim.balls[0]
+      grabOff.x = p ? c.x - p.x : 0
+      grabOff.z = p ? c.z - p.z : 0
     } else drag = 'aim'
   })
   els.input.addEventListener('pointermove', (e) => {
@@ -507,7 +567,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     }
     if (drag === 'ball') {
       const p = tablePoint(e.clientX, e.clientY)
-      if (p) placeInHand(p.x, p.z)
+      if (p) placeInHand(p.x + grabOff.x, p.z + grabOff.z)
     } else if (drag === 'aim' && !charging) {
       const sens = (fine ? 0.0007 : 0.0038) * (0.45 + zoom * 0.75)
       aim += dx * sens
@@ -516,7 +576,10 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   })
   const endPointer = (e) => {
     pointers.delete(e.pointerId)
-    if (drag === 'ball') sfx.placeBall()
+    if (drag === 'ball') {
+      sfx.placeBall()
+      if (tut?.step === 'move' && tut.moved > 0.25) tutGo('shoot')
+    }
     if (pointers.size < 2) pinchD = 0
     drag = null
     els.input.style.cursor = ''
@@ -534,11 +597,26 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     { passive: false },
   )
   function placeInHand(x, z) {
-    x = clamp(x, -BED.hx + R, BED.hx - R)
+    // behind the head string (the line through the head spot) on the break / after a break scratch
+    x = clamp(x, -BED.hx + R, kitchen ? HEAD_SPOT.x : BED.hx - R)
     z = clamp(z, -BED.hz + R, BED.hz - R)
     for (const b of sim.balls) if (b.on && b.n !== 0 && Math.hypot(b.x - x, b.z - z) < R * 2.05) return
+    const c = sim.balls[0]
+    if (tut) tut.moved = (tut.moved ?? 0) + Math.hypot(x - c.x, z - c.z)
     sim.placeCue(x, z)
     t.dirty = true
+  }
+
+  // --- calling the 8 ball's pocket: a marker on each pocket, tap one to call it ---
+  for (const b of els.calls) {
+    b.addEventListener('pointerdown', (e) => e.stopPropagation())
+    b.addEventListener('click', () => {
+      if (!myShot() || !cleared(turn)) return
+      const k = Number(b.dataset.pk)
+      if (k !== callPocket) sfx.placeBall()
+      callPocket = k
+      callPicked = true
+    })
   }
 
   // --- power bar ---
@@ -717,14 +795,44 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   $('.mt-confirm .stay').addEventListener('click', () => show(els.confirm, false))
   $('.mt-confirm .leave').addEventListener('click', () => {
     show(els.confirm, false)
-    if (phase !== 'over' && M.active) finish(1 - myTeam, 'You left the match', true)
+    if (phase !== 'over' && M.active) {
+      forfeit()
+      finish(1 - myTeam, 'You left the match', true)
+    }
   })
   els.skip.addEventListener('click', () => {
     if (!tut) return
     endTutorial()
     sfx.toggle(false)
   })
-  $('.mt-result button').addEventListener('click', exit)
+  $('.mt-result .mt-continue').addEventListener('click', exit)
+  // Rewarded ad on the result card: watch one to double the match cash (Boxity runs the ad; the game
+  // server checks its single-use token, backend adReward). Cash only, never premium currency.
+  onServer('adRewardResult', () => {})
+  const adBtn = $('.mt-ad')
+  let adCash = 0
+  let adBusy = false
+  const adLabel = (text) => (adBtn.querySelector('.tx').textContent = text)
+  adBtn.addEventListener('click', async () => {
+    if (adBusy || !adCash) return
+    adBusy = true
+    adBtn.disabled = true
+    const r = await showRewarded('double-cash')
+    if (r.status === 'completed') {
+      const v = await request('adReward', { rewardToken: r.rewardToken }, 'adRewardResult')
+      if (v.ok || v.reason === 'offline') {
+        addCash(adCash)
+        sfx.cash(3)
+        $('.mt-res-card .reward').textContent = `+$${adCash * 2}`
+        show(adBtn, false)
+        adCash = 0
+      } else adLabel('Ad reward unavailable')
+    } else {
+      adLabel(r.status === 'skipped' ? 'Watch it all to double!' : 'No ad right now, try later')
+      adBtn.disabled = false
+    }
+    adBusy = false
+  })
   window.addEventListener('keydown', (e) => {
     if (!M.active || e.target instanceof HTMLInputElement) return
     if (e.code === 'Space' && !e.repeat && myShot() && powerAllowed()) {
@@ -750,6 +858,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     zoomOut: COARSE ? 'Pinch to zoom out and see the angle better!' : 'Scroll to zoom out and see the angle better!',
     zoomIn: COARSE ? 'Now pinch to zoom all the way in!' : 'Now scroll to zoom all the way in!',
     anytime: 'You can zoom in and out any time.',
+    move: 'Ball in hand! Drag the cue ball anywhere!',
     shoot: 'Now pull the power bar to shoot!',
   }
   function tutGo(step) {
@@ -758,6 +867,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     tut.step = step
     tut.t = 0
     tut.drag = 0
+    if (step === 'move') tut.moved = 0
     setTut(TUT[step] ?? '')
     sfx.tutStep()
   }
@@ -788,58 +898,73 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     if (s === 'drag' && tut.drag > 160 && tut.t > 0.8) tutGo('zoomOut')
     else if (s === 'zoomOut' && zoom > 0.93) tutGo('zoomIn')
     else if (s === 'zoomIn' && zoom < 0.06) tutGo('anytime')
-    else if (s === 'anytime' && tut.t > 2.2) tutGo('shoot')
+    else if (s === 'anytime' && tut.t > 2.2) tutGo(ballInHand ? 'move' : 'shoot')
   }
 
   // --- turns ---
-  const teamMembers = (team) => tables.all(t).filter((e) => tables.teamOf(t, e) === team)
-  const shooter = () => {
-    const m = teamMembers(turn)
-    return m[((shooterIdx[turn] % Math.max(1, m.length)) + m.length) % Math.max(1, m.length)] ?? null
-  }
+  const stand = new Map() // sessionId -> placeholder for a player whose roster entry is gone
+  const who = (sid) => (sid === mySid() ? me : entityOf(sid) ?? stand.get(sid) ?? stand.set(sid, { id: sid, name: 'Player' }).get(sid))
+  const teamMembers = (team) => (teams[team] ?? []).map(who)
+  const shooter = () => (shooterSid ? who(shooterSid) : null)
+  const myTurn = () => shooterSid === mySid()
   const cleared = (team) => groups[team] && sim.balls.every((b) => !b.on || groupOf(b.n) !== groups[team])
   const legalFor = (team) => (n) => {
     const g = groups[team]
     if (!g) return n !== 8
     return cleared(team) ? n === 8 : groupOf(n) === g
   }
-  function beginTurn(newInning) {
-    if (newInning) shooterIdx[turn]++
-    clock = MATCH.shotClock
+  const nearestPocket = (b) => {
+    let best = 0
+    POCKETS.forEach(([px, pz], i) => {
+      if (Math.hypot(px - b.x, pz - b.z) < Math.hypot(POCKETS[best][0] - b.x, POCKETS[best][1] - b.z)) best = i
+    })
+    return best
+  }
+  function beginTurn() {
+    clock = tut ? MATCH.tutorClock : MATCH.shotClock
     lastClockTick = 0
     power = 0
     const s = shooter()
     if (ballInHand) moveTimer = 10
+    grabbed = false
+    aimKey = ''
+    callPocket = -1
+    callPicked = false
     renderCards()
-    if (s === me) {
+    if (myTurn()) {
       phase = 'aim'
       setView('aim')
       if (!breakShot) {
         const shot = pickShot(sim, legalFor(turn), 1)
         aim = shot.angle
+        // on the 8: the suggested shot's pocket is the call until I tap another one
+        if (cleared(turn)) callPocket = shot.pocket >= 0 ? shot.pocket : nearestPocket(sim.balls[8])
       } else aim = 0
       zoomTarget = breakShot ? 0.15 : zoomTarget
-      if (!tut) banner('turn', 'YOUR TURN', ballInHand ? 'Ball in hand' : '', 1.4)
+      if (distracted) banner('foul', 'DISTRACTED!', 'Look Over There! Your shot goes wild', 2)
+      else if (!tut) banner('turn', 'YOUR TURN', ballInHand ? 'Ball in hand' : '', 1.4)
       else hideBanner()
       sfx.yourTurn()
       if (tut && breakShot && tut.step === 'pending') tutGo('break')
       if (tut && !breakShot && tut.step === 'pending') tutGo('drag')
       standAtWaitSpot(false)
     } else {
-      phase = 'ai'
+      phase = 'remote'
       setView('hub')
-      aiTimer = rnd(...MATCH.aiThink) + (ballInHand ? 0.8 : 0)
-      banner('wait', "OPPONENT'S TURN", '', 0)
+      remoteAb = ''
+      shotByMe = false
+      banner('wait', turn === myTeam ? "TEAMMATE'S TURN" : "OPPONENT'S TURN", s?.name ?? '', 0)
       sfx.opponentTurn()
       standAtWaitSpot(true)
-      if (newInning || breakShot) syncYawToPlayer()
+      syncYawToPlayer()
     }
     renderAbility()
   }
   // Where I wait while the others shoot: on my side of the table, facing it.
   function standAtWaitSpot(snap) {
     const side = myTeam ? -1 : 1
-    const x = t.x + (myTeam ? 1.4 : -1.4)
+    const idx = Math.max(0, teams[myTeam]?.indexOf(mySid()) ?? 0) // teammates stand side by side
+    const x = t.x + (myTeam ? 1 : -1) * (1.4 - idx * 1.3)
     const z = t.z + side * (TABLE.width / 2 + 0.75)
     const facing = side > 0 ? Math.PI : 0
     if (snap || Math.hypot(player.position.x - x, player.position.z - z) > 0.05) resetPlayer({ x, y: 0.05, z }, facing)
@@ -850,10 +975,22 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     shotAb = armed
     const ab = play.shoot(shotAb, speed)
     speed = ab.speed
-    pending = { angle: aim, speed, t: 0, fromPower: power, mine: true, mods: ab.mods }
+    let angle = aim
+    if (distracted) {
+      // Look Over There!: the shot goes wild
+      distracted = false
+      angle += rnd(0.18, 0.55) * (Math.random() < 0.5 ? -1 : 1)
+      speed *= rnd(0.45, 1.15)
+      hud.popup('HUH?!', new Vector3(t.x + sim.balls[0].x, TABLE_BED_Y + 0.45, t.z + sim.balls[0].z), '#ffb02e', 1.1)
+    }
+    pending = { angle, speed, t: 0, fromPower: power, mods: ab.mods }
+    // the rules judge the shot by the table as it was before it (is the team on the 8, the call)
+    shotPre = { onEight: !breakShot && !!cleared(turn), kitchen, bih: ballInHand, call: callPocket }
+    const c = sim.balls[0]
+    sendServer('mShot', { seq, a: angle, s: speed, sx: spin.x, sy: spin.y, el: elev, ab: shotAb, x: c.x, z: c.z })
     lastTickPower = 0
     show(els.spinPanel, false)
-    t.aim = { angle: aim, speed, t: 0.7, shooter: me }
+    t.aim = { angle, speed, t: 0.7, shooter: me }
     phase = 'strike'
     shotByMe = true
     if (tut) {
@@ -867,35 +1004,6 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
       }
     }
   }
-  function aiShot() {
-    const s = shooter()
-    if (ballInHand) {
-      let best = null
-      for (let i = 0; i < 24; i++) {
-        const x = rnd(-BED.hx + R, BED.hx - R)
-        const z = rnd(-BED.hz + R, BED.hz - R)
-        if (sim.balls.some((b) => b.on && b.n !== 0 && Math.hypot(b.x - x, b.z - z) < R * 2.2)) continue
-        sim.placeCue(x, z)
-        const shot = pickShot(sim, legalFor(turn), 1)
-        if (!best || (shot.score ?? -99) > best.score) best = { x, z, score: shot.score ?? -99 }
-      }
-      if (best) sim.placeCue(best.x, best.z)
-      t.dirty = true
-    }
-    let shot
-    if (breakShot) shot = { angle: Math.atan2(FOOT_SPOT.z - sim.balls[0].z, FOOT_SPOT.x - sim.balls[0].x) + rnd(-0.015, 0.015), speed: rnd(6, 7) }
-    else shot = pickShot(sim, legalFor(turn), (matchTutorial ? 0.5 : MATCH.aiSkill) + rnd(-0.1, 0.1))
-    shot = play.aiShot(shot) // Look Over There!: a wild shot
-    renderAbility()
-    pending = { angle: shot.angle, speed: shot.speed, t: 0, mine: false }
-    t.aim = { angle: shot.angle, speed: shot.speed, t: 0, shooter: s }
-    const st = stanceFor(shot.angle)
-    s?.stance?.(st.x, st.z, st.facing)
-    phase = 'strike'
-    shotByMe = false
-    shotAb = ''
-    play.endShot()
-  }
   function stanceFor(angle) {
     const c = sim.balls[0]
     const dx = -Math.cos(angle)
@@ -906,78 +1014,169 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     return { x: t.x + c.x + dx * k, z: t.z + c.z + dz * k, facing: Math.atan2(-dx, -dz) }
   }
 
+  // My shot settled: the rules decide the outcome, the server passes it on (mEnd -> mTurn).
   function resolve() {
+    const pre = shotPre ?? { onEight: false, kitchen: false, bih: false, call: -1 }
+    shotPre = null
     const sunk = sim.sunkThisShot
+    const potted = sunk.filter((n) => n !== 0) // object balls (the 8 too)
     const scratch = !sim.balls[0].on
     const first = sim.firstHit
     const g = groups[turn]
+    // a legal break pots a ball or drives at least 4 object balls to a cushion
+    const badBreak = breakShot && !potted.length && sim.railBalls.size < 4
     let foul = scratch || first < 0
     let why = scratch ? 'Scratched the white ball' : first < 0 ? 'No ball was hit' : ''
-    if (!foul && g && !cleared(turn) && (first === 8 || groupOf(first) !== g)) {
+    if (!foul && g && (pre.onEight ? first !== 8 : first === 8 || groupOf(first) !== g)) {
       foul = true
-      why = 'Hit the wrong ball first'
+      why = pre.onEight ? 'You must hit the 8 ball first' : 'Hit the wrong ball first'
     }
     if (!foul && !g && first === 8 && !breakShot) {
       foul = true
       why = 'Hit the 8 ball first'
     }
+    // after the first contact a ball must be potted or some ball must touch a cushion
+    if (!foul && !breakShot && !potted.length && !sim.railAfter) {
+      foul = true
+      why = 'No ball hit a cushion after contact'
+    }
+    const ball8 = sim.balls[8]
+    const won8 = sunk.includes(8) && !breakShot && !foul && pre.onEight && ball8.pocket === pre.call
     // Rewind: my shot that fouls, loses on the 8 or pots nothing of mine goes back
-    if (turn === myTeam && shotByMe && shotAb === 'rewind') {
+    if (shotAb === 'rewind') {
       const ownPot = sunk.some((n) => n !== 0 && n !== 8 && (!g || groupOf(n) === g))
-      const winning8 = sunk.includes(8) && !foul && !breakShot && g && sim.balls.every((b) => !b.on || groupOf(b.n) !== g)
-      if (!winning8 && play.rewind(foul || sunk.includes(8) || !ownPot)) {
+      if (!won8 && play.rewind(foul || badBreak || sunk.includes(8) || !ownPot)) {
         shotAb = ''
         play.endShot()
         t.dirty = true
-        renderCards()
-        beginTurn(false)
-        return banner('turn', 'REWIND!', 'Take that shot again', 1.6)
+        return sendEnd({ turn, bih: pre.bih, note: 'rewind' })
       }
     }
-    const timeStop = turn === myTeam && shotByMe && play.keepsTurn()
-    if (scratch) sim.placeCue(HEAD_SPOT.x, HEAD_SPOT.z)
+    const timeStop = play.keepsTurn()
     shotAb = ''
     play.endShot()
+    t.dirty = true
+    // an illegal break: re-racked, the other team breaks (ball in hand behind the head string)
+    if (badBreak) {
+      sim.rack(Math.random())
+      return sendEnd({ turn: 1 - turn, bih: true, note: 'rerack', foul: 'Illegal break: 4 balls must reach a cushion. Re-racked' })
+    }
+    if (scratch) sim.placeCue(HEAD_SPOT.x, HEAD_SPOT.z)
     if (sunk.includes(8)) {
       if (breakShot) {
-        const b = sim.balls[8]
-        Object.assign(b, { on: true, x: FOOT_SPOT.x, z: FOOT_SPOT.z, vx: 0, vz: 0, pocket: -1 })
+        // the 8 on the break is spotted again
+        Object.assign(ball8, { on: true, x: FOOT_SPOT.x, z: FOOT_SPOT.z, vx: 0, vz: 0, pocket: -1 })
       } else {
-        const won = !foul && groups[turn] && sim.balls.every((b) => !b.on || groupOf(b.n) !== groups[turn])
-        return finish(won ? turn : 1 - turn, won ? 'Sank the 8 ball!' : scratch ? 'Scratched on the 8 ball' : 'The 8 ball went down early')
+        const lost = scratch ? 'Scratched on the 8 ball' : !pre.onEight ? 'The 8 ball went down early' : foul ? `Foul on the 8 ball: ${why}` : 'The 8 ball went in the wrong pocket'
+        return sendEnd({ turn, winner: won8 ? turn : 1 - turn, why: won8 ? 'Sank the 8 ball!' : lost })
       }
     }
     const own = sunk.filter((n) => n !== 0 && n !== 8)
+    const next = [...groups]
+    let note = ''
     if (!g && !foul && !breakShot && own.length) {
-      groups[turn] = groupOf(own[0])
-      groups[1 - turn] = other(groups[turn])
-      banner('group', `YOU ARE ${groups[myTeam].toUpperCase()}`, '', 2.2)
-      sfx.groupAssigned()
+      // open table: a shot that pots one group takes it; potting both, the first ball hit decides if it went down
+      const both = own.some((n) => n < 8) && own.some((n) => n > 8)
+      next[turn] = groupOf(both && own.includes(first) ? first : own[0])
+      next[1 - turn] = other(next[turn])
+      note = 'group'
     }
-    const potOwn = own.some((n) => !groups[turn] || groupOf(n) === groups[turn])
-    breakShot = false
+    const potOwn = own.some((n) => !next[turn] || groupOf(n) === next[turn])
+    // a scratch on the break: ball in hand behind the head string
+    if (foul) return sendEnd({ turn: 1 - turn, groups: next, bih: true, foul: why, note: breakShot && scratch ? 'kitchen' : '' })
+    // potting any ball on a legal break (the spotted 8 too) keeps the breaker at the table
+    if ((own.length && potOwn) || (breakShot && potted.length)) return sendEnd({ turn, groups: next, note })
+    if (timeStop) return sendEnd({ turn, groups: next, note: note || 'timeStop' })
+    sendEnd({ turn: 1 - turn, groups: next, note })
+  }
+  // The outcome of my turn to the server; every client (me too) moves on when its mTurn comes back.
+  function sendEnd(o) {
+    phase = 'wait'
+    t.cue.visible = false
+    hideGuide()
+    const passes = o.turn !== turn
+    sendServer('mEnd', {
+      seq,
+      balls: packBalls(sim),
+      turn: o.turn,
+      groups: (o.groups ?? groups).map((x) => x ?? ''),
+      bih: !!o.bih,
+      foul: o.foul ?? '',
+      note: o.note ?? '',
+      winner: o.winner ?? -1,
+      why: o.why ?? '',
+      distract: passes && !!play.distract,
+    })
+  }
+  // The server's mTurn: the settled balls, the next shooter, and what happened.
+  function applyTurn(msg) {
+    if (msg.matchId !== matchId || !(msg.seq > seq)) return
+    seq = msg.seq
+    if (Array.isArray(msg.teams)) teams = msg.teams
+    applyBalls(sim, msg.balls)
     t.dirty = true
-    if (foul) {
-      ballInHand = true
-      const wasMe = turn === myTeam
-      turn = 1 - turn
-      if (wasMe) streakCount = 0
-      banner('foul', 'FOUL!', why, 2.4)
+    pending = null
+    t.aim = null
+    remoteAb = ''
+    sfx.setRoll(0)
+    layer.classList.remove('ab-timestop')
+    const was = turn
+    if (Array.isArray(msg.groups)) groups = msg.groups.map((x) => x || null)
+    if (msg.winner === 0 || msg.winner === 1) return finish(msg.winner, msg.why || (msg.winner === myTeam ? 'You won!' : 'You lost'))
+    // a re-rack is a new break; a rewind takes the same shot again
+    if (msg.note !== 'rewind' && msg.note !== 'rerack') breakShot = false
+    turn = msg.turn
+    shooterSid = msg.shooter
+    ballInHand = !!msg.bih
+    if (msg.note !== 'rewind') kitchen = ballInHand && (msg.note === 'kitchen' || msg.note === 'rerack')
+    if (was === myTeam && turn !== myTeam) streakCount = 0
+    if (msg.distract) {
+      if (turn === myTeam) distracted = true
+      else oppDistracted = true
+    }
+    renderCards()
+    if (msg.foul) {
+      t.cue.visible = false
+      hideGuide()
+      banner('foul', msg.note === 'rerack' ? 'ILLEGAL BREAK!' : 'FOUL!', msg.foul, 2.4)
       sfx.foul()
-      renderCards()
       phase = 'pause'
       aiTimer = 1.4
       return
     }
-    ballInHand = false
-    if (own.length && potOwn) return beginTurn(false)
-    if (timeStop) {
-      beginTurn(false)
-      return banner('turn', 'TIME STOP!', 'Still your turn', 1.6)
+    beginTurn()
+    if (msg.note === 'group') {
+      banner('group', `YOU ARE ${groups[myTeam].toUpperCase()}`, '', 2.2)
+      sfx.groupAssigned()
+    } else if (msg.note === 'rewind') banner('turn', 'REWIND!', myTurn() ? 'Take that shot again' : 'They take that shot again', 1.6)
+    else if (msg.note === 'timeStop') banner('turn', 'TIME STOP!', myTurn() ? 'Still your turn' : 'They shoot again', 1.6)
+  }
+  // Another player's shot left the cue (tablenet.js draws it).
+  function remoteShot(msg) {
+    if (phase !== 'remote') return
+    hideBanner()
+    phase = 'remoteRoll'
+    setView('watch')
+    remoteAb = ABILITY_BY_ID[msg.ab] ? msg.ab : ''
+    if (remoteAb) banner('turn', `${ABILITY_BY_ID[remoteAb].name.toUpperCase()}!`, shooter()?.name ?? '', 1.4)
+    if (oppDistracted && turn !== myTeam) {
+      oppDistracted = false
+      play.aiShot({ angle: 0, speed: 0 }) // HUH?! (clears my Look Over There!)
+      renderAbility()
     }
-    if (turn === myTeam) streakCount = 0
-    turn = 1 - turn
-    beginTurn(true)
+  }
+  M.showingResult = () => M.active && !els.result.classList.contains('hidden')
+  M.shooting = () => M.active && (phase === 'aim' || phase === 'strike' || phase === 'rolling' || phase === 'wait')
+  M.onNet = (type, msg) => {
+    if (!M.active || phase === 'over' || phase === 'off') return
+    if (type === 'mTurn') return applyTurn(msg)
+    if (type === 'mTeams') {
+      if (msg.matchId === matchId && Array.isArray(msg.teams)) teams = msg.teams
+      return renderCards()
+    }
+    if (msg.seq !== seq) return
+    if (type === 'mShot') remoteShot(msg)
+    if (type === 'mAim' && !myTurn() && Number.isInteger(msg.k)) callPocket = msg.k // the shooter's call for the 8
   }
 
   function finish(winner, why, forfeit = false) {
@@ -996,7 +1195,15 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     $('.mt-res-card h2').style.color = won ? '#3dff8a' : '#ff6b6b'
     $('.mt-res-card .reward').textContent = reward ? `+$${reward}` : 'No reward'
     $('.mt-res-card p').textContent = why
-    setTimeout(() => show(els.result, true), won ? 900 : 500)
+    adCash = reward
+    adBusy = false
+    adBtn.disabled = false
+    adLabel(`Watch an ad: 2x cash (+$${reward})`)
+    show(adBtn, reward > 0 && rewardedAvailable())
+    setTimeout(() => {
+      show(els.result, true)
+      adScreen('results') // Boxity's banners around the result card
+    }, won ? 900 : 500)
     if (won) {
       sfx.win()
       hubFx?.burst(t.x, TABLE.height + 0.2, t.z, '#ffd23d')
@@ -1028,28 +1235,40 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     M.table = null
     M.freeCam = false
     phase = 'off'
-    tables.finish(table, M.winner ?? 0)
+    room = null
     resetPlayer({ x: table.x + 3.2, y: 0.05, z: table.padZ + 2.6 }, Math.PI)
     syncYawToPlayer()
   }
 
-  M.start = (table) => {
+  // msg = the server's matchStart { matchId, seq, seed, teams, turn, shooter }
+  M.start = (table, msg) => {
     t = table
     sim = t.sim
+    matchId = msg.matchId
+    seq = msg.seq
+    teams = msg.teams
+    shooterSid = msg.shooter
+    turn = msg.turn
+    room = net.room
+    distracted = oppDistracted = false
+    remoteAb = ''
+    shotByMe = false
+    stand.clear()
     M.table = t
     M.active = true
     M.winner = null
     document.body.classList.add('in-match')
     setMoveLock(true)
-    sim.rack()
+    sim.rack(msg.seed)
     t.dirty = true
-    myTeam = tables.teamOf(t, me)
-    oppCue = tables.all(t).find((e) => !e.isPlayer && tables.teamOf(t, e) !== myTeam)?.cueId ?? 'classic'
+    myTeam = Math.max(0, teams.findIndex((m) => m.includes(mySid())))
     groups = [null, null]
     breakShot = true
-    ballInHand = false
+    // the breaker places the cue ball behind the head string (not in the first-match tutorial)
+    ballInHand = kitchen = !!save.tutorialDone
+    callPocket = -1
+    shotPre = null
     moveTimer = 0
-    shooterIdx = [-1, -1]
     streakCount = 0
     armed = ''
     shotAb = ''
@@ -1065,7 +1284,6 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     matchTutorial = !save.tutorialDone
     tut = matchTutorial ? { step: 'pending', t: 0, drag: 0 } : null
     show(els.skip, matchTutorial)
-    turn = matchTutorial ? myTeam : Math.random() < 0.5 ? 0 : 1
     camera.near = 0.03
     camera.updateProjectionMatrix()
     camGoal.p.copy(camera.position)
@@ -1082,7 +1300,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     // who breaks?
     const a = teamMembers(myTeam)[0] ?? me
     const b = teamMembers(1 - myTeam)[0] ?? a
-    const winner = teamMembers(turn)[0] ?? a
+    const winner = shooter() ?? a
     roulette = { faces: [a, b], winner, t: 0, next: 0, idx: 0, done: false }
     phase = 'roulette'
     show(els.roulette, true)
@@ -1108,7 +1326,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
           els.roulette.classList.add('picked')
           sfx.breakerPicked()
         } else sfx.rouletteTick(k)
-        els.rouletteImg.src = portrait(face)
+        setFace(els.rouletteImg, face)
         els.rouletteName.textContent = face === me ? 'You' : face.name
       }
     } else if (r.t - r.doneAt > 1.1) {
@@ -1116,7 +1334,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
       roulette = null
       phase = 'intro'
       introTimer = 0.6
-      if (!tut) banner('turn', turn === myTeam ? 'YOU BREAK!' : `${teamMembers(turn)[0]?.name ?? 'Opponent'} breaks`, '', 1.4)
+      if (!tut) banner('turn', myTurn() ? 'YOU BREAK!' : `${shooter()?.name ?? 'Opponent'} breaks`, '', 1.4)
     }
   }
 
@@ -1127,7 +1345,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
       const card = els.cards[team === myTeam ? 0 : 1]
       const m = teamMembers(team)
       const face = (team === turn ? shooter() : m[0]) ?? m[0]
-      if (face) card.querySelector('img').src = portrait(face)
+      if (face) setFace(card.querySelector('img'), face)
       card.classList.toggle('turn', team === turn && phase !== 'over' && phase !== 'roulette')
       const g = groups[team]
       const rack = card.querySelector('.mt-rack')
@@ -1316,6 +1534,8 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     // ball in hand ring
     handRing.visible = ballInHand && moveTimer > 0
     handRing.position.set(ox + c.x, TABLE_BED_Y + 0.004, oz + c.z)
+    if (handRing.visible && kitchen) setStrip(headLine, ox + HEAD_SPOT.x, oz - BED.hz, ox + HEAD_SPOT.x, oz + BED.hz)
+    else headLine.visible = false
   }
 
   // Cue along the shot, its tip `gap` behind the cue ball, offset for spin, tilted by elevation.
@@ -1443,6 +1663,8 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   // --- per frame ---
   M.update = (dt, elapsed) => {
     if (!M.active) return
+    // the server went away: the match can't go on
+    if (phase !== 'over' && room && net.room !== room) finish(1 - myTeam, 'Lost the connection to the server', true)
     if (bannerTimer > 0 && !bannerSticky) {
       bannerTimer -= dt
       if (bannerTimer <= 0) els.banner.classList.remove('show')
@@ -1460,10 +1682,10 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     if (phase === 'roulette') updateRoulette(dt)
     else if (phase === 'intro') {
       introTimer -= dt
-      if (introTimer <= 0) beginTurn(true)
+      if (introTimer <= 0) beginTurn()
     } else if (phase === 'pause') {
       aiTimer -= dt
-      if (aiTimer <= 0) beginTurn(true)
+      if (aiTimer <= 0) beginTurn()
     } else if (phase === 'aim') {
       aim += fineDir * MATCH.fineAim * (fine ? 0.25 : 1) * dt
       if (spaceCharge) {
@@ -1474,8 +1696,9 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
         sfx.powerTick(power)
         lastTickPower = power
       }
-      if (ballInHand && moveTimer > 0) moveTimer = Math.max(0, moveTimer - dt)
-      if (!tut) {
+      // on the 8: until I tap a pocket, the call follows the pocket the guide aims at
+      if (cleared(turn) && !callPicked && aimPocket >= 0) callPocket = aimPocket
+      {
         clock -= dt
         const n = Math.ceil(clock)
         if (n <= 5 && n !== lastClockTick && n > 0) {
@@ -1483,18 +1706,9 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
           sfx.clockTick(true)
         }
         if (clock <= 0) {
-          t.cue.visible = false
-          hideGuide()
-          ballInHand = true
-          turn = 1 - turn
-          streakCount = 0
-          banner('foul', 'FOUL!', 'Ran out of time', 2.2)
-          sfx.foul()
           charging = spaceCharge = false
           power = 0
-          phase = 'pause'
-          aiTimer = 1.2
-          hideGuide()
+          sendEnd({ turn: 1 - turn, bih: true, foul: 'Ran out of time' })
         }
       }
       if (phase === 'aim') {
@@ -1503,44 +1717,44 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
         const st = stanceFor(aim)
         if (Math.hypot(player.position.x - st.x, player.position.z - st.z) > 0.05) resetPlayer({ x: st.x, y: 0.05, z: st.z }, st.facing)
         player.facing = st.facing
+        // the others see my cue turn (and the cue ball move in hand)
+        const now = performance.now()
+        if (now - sendAt > 100) {
+          const q = { seq, a: Math.round(aim * 1000) / 1000, p: Math.round(power * 100) / 100, k: cleared(turn) ? callPocket : -1 }
+          if (ballInHand) {
+            q.x = Math.round(c.x * 1e4) / 1e4
+            q.z = Math.round(c.z * 1e4) / 1e4
+          }
+          const key = `${q.a}|${q.p}|${q.x}|${q.z}|${q.k}`
+          if (key !== aimKey) {
+            aimKey = key
+            sendAt = now
+            sendServer('mAim', q)
+          }
+        }
       }
-    } else if (phase === 'ai') {
+    } else if (phase === 'remote' || phase === 'remoteRoll') {
       hideGuide()
-      t.cue.visible = false
-      aiTimer -= dt
-      if (ballInHand) moveTimer = Math.max(0, moveTimer - dt)
-      clock -= dt
-      if (aiTimer <= 0) aiShot()
+      if (phase === 'remote') clock -= dt
     } else if (phase === 'strike') {
       hideGuide()
       pending.t += dt
       t.aim.t = pending.t
-      let fireNow = false
-      if (pending.mine) {
-        // my stroke: from where the power bar left it, a quick ease-in thrust
-        const pull = 0.035 + pending.fromPower * 0.36
-        const k = Math.min(1, pending.t / 0.085)
-        placeMyCue(pending.angle, Math.max(0, pull * (1 - k * k)))
-        fireNow = k >= 1
-      } else {
-        const pull = 0.06 + Math.min(pending.t, 0.7) * 0.3
-        const gap = pending.t < 0.7 ? pull : Math.max(0.01, pull - (pending.t - 0.7) * 4)
-        tables.placeCue(t, pending.angle, gap)
-        applyCueLook(t.cue, oppCue)
-        t.cue.visible = true
-        fireNow = pending.t >= 0.78
-      }
-      if (fireNow) {
-        sim.shoot(pending.angle, pending.speed, pending.mine ? { x: spin.x, y: spin.y, elev } : null, pending.mine ? pending.mods : null)
+      // my stroke: from where the power bar left it, a quick ease-in thrust
+      const pull = 0.035 + pending.fromPower * 0.36
+      const k = Math.min(1, pending.t / 0.085)
+      placeMyCue(pending.angle, Math.max(0, pull * (1 - k * k)))
+      if (k >= 1) {
+        sim.shoot(pending.angle, pending.speed, { x: spin.x, y: spin.y, elev }, pending.mods)
         rollT = 0
-        layer.classList.toggle('ab-timestop', pending.mine && shotAb === 'timeStop')
-        if (pending.mine) {
-          armed = ''
-          renderAbility()
-          ballInHand = false
-          moveTimer = 0
-          setView('watch')
-        }
+        outbox.length = 0
+        sendAt = 0
+        layer.classList.toggle('ab-timestop', shotAb === 'timeStop')
+        armed = ''
+        renderAbility()
+        ballInHand = false
+        moveTimer = 0
+        setView('watch')
         t.aim = null
         power = 0
         phase = 'rolling'
@@ -1551,8 +1765,16 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
         }, 120)
       }
     } else if (phase === 'rolling') {
+      const e0 = sim.events.length
       sim.step(dt)
       rollT += dt
+      // the others watch it: ball positions + sound/fx events, ~15 a second
+      for (let i = e0; i < sim.events.length; i++) packEvent(sim.events[i], outbox)
+      const now = performance.now()
+      if (now - sendAt > 66) {
+        sendAt = now
+        sendServer('mBalls', { seq, b: packBalls(sim), ev: outbox.splice(0, 200) })
+      }
       if (shotAb && c.on) {
         const sp = Math.hypot(c.vx, c.vz)
         if (sp > 0.05) {
@@ -1568,6 +1790,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
       if (!sim.moving() && (stuck || !play.settle())) {
         sfx.setRoll(0)
         layer.classList.remove('ab-timestop')
+        if (outbox.length) sendServer('mBalls', { seq, b: packBalls(sim), ev: outbox.splice(0, 200) })
         resolve()
       }
     }
@@ -1580,6 +1803,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     // fire aura on the armed cue ball
     if (armed && (phase === 'aim' || phase === 'strike')) mfx.setAura(true, t.x + c.x, BALL_Y, t.z + c.z, R, elapsed, armed === 'fireShot' ? null : TINT[armed])
     else if (shotAb && phase === 'rolling' && c.on) mfx.setAura(true, t.x + c.x, BALL_Y, t.z + c.z, R * 0.8, elapsed, shotAb === 'fireShot' ? null : TINT[shotAb])
+    else if (remoteAb && phase === 'remoteRoll' && c.on) mfx.setAura(true, t.x + c.x, BALL_Y, t.z + c.z, R * 0.8, elapsed, remoteAb === 'fireShot' ? null : TINT[remoteAb])
     else mfx.setAura(false)
     play.update(dt, elapsed, armed)
 
@@ -1607,25 +1831,43 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
     els.powerCue.style.transform = `translateY(${p * 46}%)`
     els.powerLbl.textContent = p > 0.005 ? `${Math.round(p * 100)}%` : 'PULL'
     // clock pill + card arcs
-    const timed = (phase === 'aim' || phase === 'ai') && !tut
+    const timed = phase === 'aim' || phase === 'remote'
     show(els.clock, timed && clock <= 20)
     if (timed) els.clockNum.textContent = String(Math.max(0, Math.ceil(clock)))
     els.clock.classList.toggle('urgent', clock <= 5)
-    const frac = timed ? clamp(clock / MATCH.shotClock, 0, 1) : 1
+    const frac = timed ? clamp(clock / (tut ? MATCH.tutorClock : MATCH.shotClock), 0, 1) : 1
     for (const card of els.cards) {
       const arc = card.querySelector('.arc')
       arc.setAttribute('stroke-dashoffset', String(card.classList.contains('turn') ? 100 * (1 - frac) : 0))
     }
     // ball in hand
-    const bip = ballInHand && moveTimer > 0 && (phase === 'aim' || phase === 'ai')
+    const bip = ballInHand && moveTimer > 0 && (phase === 'aim' || phase === 'remote')
     show(els.move, bip)
-    if (bip) els.moveTxt.textContent = `MOVE ${Math.ceil(moveTimer)}s`
+    if (bip) els.moveTxt.textContent = kitchen ? 'BALL IN HAND: BEHIND THE LINE' : 'BALL IN HAND'
     show(els.bip, bip && phase === 'aim')
+    els.bip.querySelector('span').textContent = kitchen ? 'Drag the cue ball behind the line' : 'Drag the cue ball anywhere'
+    // the 8 ball's call: a marker on each pocket (tap one) on my turn, the called one for the others
+    const shooting8 = (phase === 'aim' || phase === 'remote') && cleared(turn) && !breakShot
+    show(els.callHint, shooting8 && phase === 'aim' && !charging && els.invalid.classList.contains('hidden'))
+    for (let i = 0; i < els.calls.length; i++) {
+      const b = els.calls[i]
+      const p = POCKETS[i]
+      const ps = shooting8 && (phase === 'aim' || i === callPocket) ? screenOf(t.x + p[0], TABLE_BED_Y, t.z + p[1]) : null
+      show(b, !!ps)
+      if (!ps) continue
+      b.classList.toggle('on', i === callPocket)
+      b.classList.toggle('ro', phase !== 'aim')
+      b.style.transform = `translate(-50%, -50%) translate(${ps[0]}px, ${ps[1]}px)`
+    }
     // projected labels: MOVE under the cue ball, the target pocket ring
     const c = sim.balls[0]
     let s = bip && phase === 'aim' ? screenOf(t.x + c.x, TABLE_BED_Y - 0.02, t.z + c.z) : null
     show(els.moveLbl, !!s)
     if (s) els.moveLbl.style.transform = `translate(-50%, 0) translate(${s[0]}px, ${s[1] + 8}px)`
+    // a hand on the cue ball until it has been grabbed this turn: "you can pick this up"
+    s = bip && phase === 'aim' && !grabbed && drag !== 'ball' && !charging ? screenOf(t.x + c.x, BALL_Y, t.z + c.z) : null
+    show(els.hintBall, !!s)
+    if (s) els.hintBall.style.transform = `translate(${s[0]}px, ${s[1]}px)`
     s = phase === 'aim' && aimPocket >= 0 ? screenOf(t.x + POCKETS[aimPocket][0], TABLE_BED_Y, t.z + POCKETS[aimPocket][1]) : null
     show(els.pocket, !!s)
     if (s) {
@@ -1644,7 +1886,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   // my avatar leans in over the cue while it's my shot
   M.pose = (avatar, dt) => {
     if (!M.active || !avatar) return
-    const k = phase === 'aim' || (phase === 'strike' && pending?.mine) ? 1 : 0
+    const k = phase === 'aim' || phase === 'strike' ? 1 : 0
     M.lean = (M.lean ?? 0) + (k - (M.lean ?? 0)) * Math.min(1, dt * 8)
     aimPose(avatar, M.lean, power)
   }
@@ -1653,7 +1895,9 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
   // dev-only hooks for testing states quickly
   if (import.meta.env.DEV) {
     M.debug = {
-      state: () => ({ phase, view, turn, myTeam, groups: [...groups], ballInHand, moveTimer, ability, armed, tut: tut?.step ?? null, zoom }),
+      state: () => ({ phase, view, turn, myTeam, groups: [...groups], ballInHand, moveTimer, ability, armed, tut: tut?.step ?? null, zoom, seq, matchId, shooterSid, teams, clock, breakShot, kitchen, callPocket, callPicked }),
+      // aim my shot (radians, table plane) for scripted rule tests
+      aim: (a) => (aim = a),
       // arm any ability for testing: M.debug.give('blackHole') then G
       give: (id) => {
         abKind = id
@@ -1669,6 +1913,7 @@ export function createMatch({ scene, camera, tables, hud, me, fx: hubFx, save, p
       ballInHand: () => {
         ballInHand = true
         moveTimer = 10
+        grabbed = false
       },
       endTutorial,
     }

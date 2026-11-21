@@ -96,6 +96,7 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
   win.innerHTML = '<h2 class="hud-outline">Settings</h2>'
   const rows = [
     ['sfx', 'Sound effects', 'range'],
+    ['music', 'Background music', 'range'],
     ['ambience', 'Rooftop ambience', 'range'],
     ['piano', 'Lounge piano', 'switch'],
     ['guide', 'Guide arrow', 'switch'],
@@ -146,9 +147,9 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
     let t = tags.get(e)
     if (!t) {
       const d = el('div', 'tag')
-      d.innerHTML = `<div class="tag-streak hud-outline hidden">${SVG.flame}<span></span></div><div class="tag-row"><span class="tag-badge ${e.rank >= 8 ? 'r8' : e.rank >= 5 ? 'r5' : ''}"><i>${e.rank}</i></span><span class="hud-outline tag-ct hidden"></span><span class="hud-outline nm">${esc(e.name)}</span><img class="tag-flag" alt="" src="${flagDataUrl(e.flag)}"></div>`
+      d.innerHTML = `<div class="tag-bubble hidden"><span></span></div><div class="tag-streak hud-outline hidden">${SVG.flame}<span></span></div><div class="tag-row"><span class="tag-badge ${e.rank >= 8 ? 'r8' : e.rank >= 5 ? 'r5' : ''}"><i>${e.rank}</i></span><span class="hud-outline tag-ct hidden"></span><span class="hud-outline nm">${esc(e.name)}</span><img class="tag-flag" alt="" src="${flagDataUrl(e.flag)}"></div>`
       world.append(d)
-      t = { el: d, streakEl: d.querySelector('.tag-streak'), num: d.querySelector('.tag-streak span'), last: -1, ct: d.querySelector('.tag-ct'), lastTag: '' }
+      t = { el: d, streakEl: d.querySelector('.tag-streak'), num: d.querySelector('.tag-streak span'), last: -1, ct: d.querySelector('.tag-ct'), lastTag: '', bubble: d.querySelector('.tag-bubble'), said: null }
       tags.set(e, t)
     }
     return t
@@ -279,15 +280,26 @@ export function createHud({ settings, onSetting, onSkip, onLeave }) {
           tags.delete(e)
         }
       }
+      const now = performance.now()
       for (const e of entities) {
         const t = tagFor(e)
+        // Boxity chat (main.js sets e.bubble { text, until }): above the tag, shown even with tags off
+        const said = e.bubble && now < e.bubble.until ? e.bubble : null
+        if (said !== t.said) {
+          t.said = said
+          t.bubble.classList.toggle('hidden', !said)
+          if (said) t.bubble.firstChild.textContent = said.text
+          t.el.classList.toggle('bubble-only', !!said && !showTags)
+        }
+        if (!said && e.bubble) e.bubble = null
         head.set(e.x, (e.y ?? 0) + 2.35, e.z)
         const d = camera.position.distanceTo(head)
-        const s = showTags && !e.hidden && d < 48 ? project(head, camera) : null
+        const s = (showTags || said) && !e.hidden && d < 48 ? project(head, camera) : null
         if (!s) {
           t.el.style.display = 'none'
           continue
         }
+        t.el.classList.toggle('bubble-only', !!said && !showTags)
         t.el.style.display = ''
         const k = Math.max(0.42, Math.min(1.05, 11 / d))
         t.el.style.transform = `translate(-50%, -100%) translate(${s[0]}px, ${s[1]}px) scale(${k})`

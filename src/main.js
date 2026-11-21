@@ -1,5 +1,5 @@
 import { ACESFilmicToneMapping, Clock, Group, PCFSoftShadowMap, PerspectiveCamera, Scene, SRGBColorSpace, Vector3, WebGLRenderer } from 'three'
-import { CAMERA, ECONOMY, PAD, SPAWN, TABLE, graphicsPreset, RENDER } from './config.js'
+import { CAMERA, PAD, SPAWN, TABLE, graphicsPreset, RENDER } from './config.js'
 import * as bloxity from './bloxity.js'
 import { install as installInput, onKey } from './input.js'
 import { installTouch } from './touch.js'
@@ -11,17 +11,20 @@ import { createLighting } from './lighting.js'
 import { createWorld } from './world.js'
 import { createPostFx } from './postfx.js'
 import { setNeonBloom } from './propkit.js'
-import { buildDefaultCharacter, loadBaseCharacter } from './avatar/character.js'
-import { applyProportions, attachEquippedAccessories } from './avatar/loader.js'
+import { buildDefaultCharacter } from './avatar/character.js'
+import { applyProportions } from './avatar/loader.js'
+import { buildLook, disposeLook } from './avatar/look.js'
 import { disposeAnimator, makeAnimator } from './avatar/animator.js'
-import { A } from './audio/core.js'
-import { at, installAudio, setListener, sfx, updateAmbience } from './audio/index.js'
+import { A, setAdBreak } from './audio/core.js'
+import { at, installAudio, setListener, setVolume, sfx, updateAmbience, updateMusic } from './audio/index.js'
+import { boxityEmote, loadEmoteCatalog } from './boxityEmotes.js'
 import { AUDIO } from './config.js'
 import { initNav } from './hub/nav.js'
 import { buildRooftop } from './hub/rooftop.js'
 import { SPOTS, buildLayout, floorAt } from './hub/layout.js'
 import { createTables } from './hub/tables.js'
-import { attachCue, createBots } from './hub/bots.js'
+import { attachCue } from './hub/stance.js'
+import { createTableNet } from './hub/tablenet.js'
 import { createGuide } from './hub/guide.js'
 import { createFx } from './hub/fx.js'
 import { createBoards } from './hub/boards.js'
@@ -35,10 +38,9 @@ import { initNet, net } from './net.js'
 import { applyCueLook, cueById } from './cues.js'
 import { createRemotePlayers } from './remotePlayers.js'
 import { createEmoteMenu } from './hub/emotemenu.js'
-import { BOT_WIN_EMOTES, EMOTE_BY_ID } from './emotes.js'
 
 // Boot order: Bloxity SDK -> renderer -> Rapier (async wasm) -> sky + lighting,
-// the rooftop hub (tower, city, props, tables, bots), player body -> avatar
+// the rooftop hub (tower, city, props, tables), player body -> avatar
 // (async, swaps in when ready) -> HUD + audio -> loop.
 let lighting = null
 let renderer = null
@@ -48,10 +50,19 @@ let fx = null
 // --- Save: progress.js (server save via net.js, browser copy offline) + device settings --------
 initNet()
 
-// Settings come from the portal's settings menu (or their defaults offline).
+// Settings come from the portal's settings menu (or their defaults offline). Every key in config
+// SETTINGS is listened to, which also enables its control in Boxity's menu. (Fullscreen is the
+// portal's own business: the game never applies that key.)
+let musicVolume = 0.8 // Boxity's Music slider scales the background music, rooftop ambience + lounge piano
+let fpsOn = false
 function applySetting(key, value) {
   if (key === 'camera_sensitivity') setCameraSensitivity(value)
-  else if (key === 'fullscreen') bloxity.requestFullscreen(value)
+  else if (key === 'master_volume') setVolume(value / 100)
+  else if (key === 'music_volume') {
+    musicVolume = value / 100
+    applyAudioSetting?.('ambience', save.settings.ambience)
+    applyAudioSetting?.('music', save.settings.music)
+  } else if (key === 'show_fps') fpsOn = value
   else if (key === 'graphics_quality' && renderer) {
     const next = graphicsPreset(value)
     renderer.shadowMap.enabled = next.shadows
@@ -65,6 +76,7 @@ function applySetting(key, value) {
 }
 bloxity.onSetting(applySetting)
 bloxity.init()
+loadEmoteCatalog() // Boxity's emote picker plays these (boxityEmotes.js)
 
 // --- Renderer ---------------------------------------------------------------
 const preset = graphicsPreset(bloxity.settings.graphics_quality)
@@ -106,7 +118,6 @@ initNav()
 const roof = buildRooftop(scene)
 const layout = buildLayout(scene, lighting)
 const tables = createTables(scene)
-const bots = createBots(scene, tables)
 const guide = createGuide(scene)
 fx = createFx(scene, { petalSources: layout.petalSources, firePos: SPOTS.fire, quality: preset.particles })
 resize()
@@ -147,15 +158,15 @@ let handCue = null
 
 setAvatar(buildDefaultCharacter()) // visible immediately; replaced once the rig loads
 
+// The player's whole Boxity look (guests can dress up too): avatar/look.js picks a custom character,
+// the platform character kit (outfit key) or the manual CDN path.
 async function loadAvatar() {
   const mine = ++generation
   try {
-    const group = await loadBaseCharacter()
-    if (mine !== generation) return
-    const equipped = bloxity.authState.user ? bloxity.getEquippedAvatar() : null
-    await attachEquippedAccessories(group, equipped, { skinTextureUrl: bloxity.getSkinTextureUrl() })
-    if (mine !== generation) return
-    applyProportions(group, bloxity.authState.user ? bloxity.getProportions() : null)
+    const look = { equipped: bloxity.getEquippedAvatar(), proportions: bloxity.getProportions(), skinUrl: bloxity.getSkinTextureUrl(), outfitKey: bloxity.getOutfitKey() }
+    const group = await buildLook(look, () => mine !== generation)
+    if (mine !== generation) return disposeLook(group)
+    disposeLook(avatar)
     setAvatar(group)
   } finally {
     if (mine === generation) avatarReady = true
@@ -165,6 +176,7 @@ async function loadAvatar() {
 let signedIn = null
 bloxity.subscribeAuth((s) => {
   me.name = myName()
+  me.pfp = bloxity.getPfp() // the match cards show it ('' = the painted head)
   const now = !!s.user
   if (now !== signedIn) {
     signedIn = now
@@ -172,21 +184,41 @@ bloxity.subscribeAuth((s) => {
   }
 })
 bloxity.onAvatarChanged(loadAvatar)
-bloxity.onProportionsChanged(() => applyProportions(avatar, bloxity.getProportions()))
+bloxity.onProportionsChanged(() => !avatar?.userData?.custom && applyProportions(avatar, bloxity.getProportions()))
 bloxity.onRespawnRequest(doRespawn)
+// Boxity's emote picker (the game registered 'emotes'): a catalogue clip on this player, replicated
+// to the others through the roster's `emote` like the game's own emotes. '' = taken off.
+bloxity.onPortalEmote(async (id) => {
+  if (!id) return animator?.stopEmote()
+  if (match.active) return
+  const e = boxityEmote(id) || (await loadEmoteCatalog(), boxityEmote(id))
+  if (!e || !animator || match.active) return // unknown id: ignored
+  animator.playClip(id, e.clip)
+  remotes.sendEmote(id)
+  sentEmote = id
+})
+// Ad breaks: the game holds still and goes silent until Boxity's ad is over.
+let adBreak = false
+bloxity.onAdBreak((on) => {
+  adBreak = on
+  setAdBreak(on)
+})
 
 // --- HUD + audio -------------------------------------------------------------
 installAudio()
 function applyAudioSetting(key, v) {
   if (!A.master) return
   if (key === 'sfx') A.sfx.gain.setTargetAtTime(AUDIO.buses.sfx * v, A.ctx.currentTime, 0.05)
-  if (key === 'ambience') A.amb.gain.setTargetAtTime(AUDIO.buses.amb * v, A.ctx.currentTime, 0.05)
+  if (key === 'ambience') A.amb.gain.setTargetAtTime(AUDIO.buses.amb * v * musicVolume, A.ctx.currentTime, 0.05)
+  if (key === 'music') A.music.gain.setTargetAtTime(AUDIO.buses.music * v * musicVolume, A.ctx.currentTime, 0.05)
 }
 const audioStart = setInterval(() => {
   if (!A.master) return
   clearInterval(audioStart)
   applyAudioSetting('sfx', save.settings.sfx)
   applyAudioSetting('ambience', save.settings.ambience)
+  applyAudioSetting('music', save.settings.music)
+  bloxity.triggerSettings() // the audio exists now: re-apply Boxity's saved volumes
 }, 250)
 
 const hud = createHud({
@@ -220,9 +252,30 @@ bloxity.onReservedAreas((areas) => {
   // a toolbar spanning most of the width (phones) pushes the top HUD down
   hud.setReservedTop(bar && bar.width > window.innerWidth * 0.55 ? bar.top + bar.height : 0)
 })
+// Boxity chat: each message over its sender's head for Boxity's bubble time (hud.js draws it above
+// the name tag). The sender is found by Boxity account id (roster `uid`); not here = nothing drawn.
+bloxity.onChat((m, text, seconds) => {
+  const e = m.isLocalPlayer ? me : remotes.byUid(m.userId)
+  if (e && text) e.bubble = { text, until: performance.now() + seconds * 1000 }
+})
+// Boxity's Show FPS setting: a small counter at the bottom of the screen.
+const fpsEl = document.createElement('div')
+fpsEl.className = 'hud-fps hud-outline hidden'
+document.body.appendChild(fpsEl)
+let fpsFrames = 0
+let fpsTime = 0
 
-// The player's match (match.js) takes over the camera and input while it runs.
-const match = createMatch({ scene, camera, renderer, tables, hud, me, bots, fx, save, persist, addCash: (n) => addCash(n), getMyGroup: () => playerGroup })
+// The other real players in the room (remotePlayers.js; synced through net.js's room).
+const remotes = createRemotePlayers(scene)
+// The player's match (match.js) takes over the camera and input while it runs; every seat at a
+// table is a real player, the server runs the lobbies (tablenet.js <-> backend tables.ts).
+const match = createMatch({ scene, camera, renderer, tables, hud, me, fx, save, persist, addCash: (n) => addCash(n), getMyGroup: () => playerGroup, entityOf: (sid) => remotes.bySid(sid), mySid: () => lobby.mySid(), forfeit: () => lobby.forfeit() })
+const lobby = createTableNet({ tables, me, entityOf: (sid) => remotes.bySid(sid), match })
+lobby.onMatchStart((t, msg) => {
+  if (match.active) return
+  if (me.zone?.table !== t) tables.setMembers(t, [[me], []]) // the roster catches up next frame
+  match.start(t, msg)
+})
 
 function addCash(n) {
   grantCash(n)
@@ -263,10 +316,8 @@ onChange((key) => {
 let leftZone = null // the pad the player just left via the button: ignored until they step off it
 function leavePad() {
   if (!me.zone || match.active) return
-  const t = me.zone.table
   leftZone = me.zone
-  tables.leave(me)
-  bots.cancelFill(t)
+  lobby.leave()
   sfx.padLeave()
 }
 function doRespawn() {
@@ -298,27 +349,6 @@ tables.on((type, data) => {
     lastTick = Math.ceil(t.timer) + 1
   } else if (type === 'countdown' && near) {
     hud.popup('READY!', new Vector3(t.x, 2.2, t.padZ), '#3dff8a', 0.8)
-  } else if (type === 'pot' && near) {
-    const { gain, pan } = at(t.x, t.z)
-    sfx.niceShot(gain, pan)
-    hud.popup(Math.random() < 0.5 ? 'NICE SHOT!' : 'GREAT SHOT!', new Vector3(t.x, 2.3, t.z), '#ffd23d', 1)
-  } else if (type === 'end') {
-    for (const e of tables.all(t)) {
-      if (e.isPlayer) continue
-      if (data.winners.includes(e)) {
-        e.wins++
-        e.streak++
-        e.cash = (e.cash ?? 0) + ECONOMY.winReward
-        e.rank = Math.min(8, Math.max(e.rank, Math.floor(e.wins / 5)))
-        e.animator?.playEmote(EMOTE_BY_ID[BOT_WIN_EMOTES[Math.floor(Math.random() * BOT_WIN_EMOTES.length)]]) // celebrate
-      } else {
-        e.streak = 0
-        e.cash = (e.cash ?? 0) + ECONOMY.lossReward
-      }
-    }
-    if (near && !tables.all(t).includes(me)) hud.popup(`${data.winners[0]?.name ?? 'Team'} wins!`, new Vector3(t.x, 2.6, t.z), '#ffffff', 0.8)
-  } else if (type === 'match') {
-    match.start(t)
   }
 })
 match.onEnd(({ won, reward }) => {
@@ -352,8 +382,7 @@ onKey('KeyV', toggleMode)
 onKey('KeyN', () => lighting.toggleDayNight())
 onKey('KeyR', doRespawn)
 
-// --- Emotes + the other players in the room (remotePlayers.js; synced through net.js's room) -----
-const remotes = createRemotePlayers(scene)
+// --- Emotes ----------------------------------------------------------------------------------
 const emoteMenu = createEmoteMenu({ renderer, onPlay: playEmote })
 function playEmote(e) {
   if (match.active || !animator) return
@@ -364,7 +393,6 @@ function playEmote(e) {
 onKey('KeyB', () => !match.active && emoteMenu.toggle())
 let sentEmote = null // the emote the others were told this player plays
 installTouch({ mode: toggleMode, day: () => lighting.toggleDayNight(), respawn: doRespawn })
-bots.seedGames(4)
 
 // --- Loop -------------------------------------------------------------------
 const clock = new Clock()
@@ -376,7 +404,7 @@ let wasGrounded = true
 let fallSpeed = 0
 let lastTick = 0
 const cardPos = new Vector3()
-const entities = [me, ...bots.list] // + the remote players, refilled every frame
+const entities = [me] // + the remote players, refilled every frame
 const localEntities = entities.length
 
 function nearestTable(x, z, range) {
@@ -409,8 +437,18 @@ function guideZone() {
 }
 
 renderer.setAnimationLoop(() => {
-  const dt = Math.min(clock.getDelta(), 0.1)
+  const raw = Math.min(clock.getDelta(), 0.1)
+  const dt = adBreak ? 0 : raw // an ad break holds the whole game still
   const elapsed = clock.elapsedTime
+  fpsEl.classList.toggle('hidden', !fpsOn)
+  if (fpsOn) {
+    fpsFrames++
+    fpsTime += raw
+    if (fpsTime >= 0.5) {
+      fpsEl.textContent = `${Math.round(fpsFrames / fpsTime)} FPS`
+      fpsFrames = fpsTime = 0
+    }
+  }
 
   stepPhysics(dt)
   interpolatePlayer()
@@ -446,21 +484,18 @@ renderer.setAnimationLoop(() => {
     const zone = player.grounded ? tables.zoneAt(p.x, p.z) : me.zone
     if (zone !== leftZone) leftZone = null
     if (zone && !me.zone && zone !== leftZone && tables.canJoin(zone)) {
-      if (tables.join(zone, me)) {
+      if (lobby.join(zone)) {
         sfx.padEnter()
         fx.burst(p.x, 0.3, p.z, PAD.mine)
-        bots.fillFor(zone.table)
       }
-    } else if (me.zone && zone !== me.zone && !['match'].includes(me.zone.table.state)) {
-      const t = me.zone.table
-      tables.leave(me)
-      bots.cancelFill(t)
+    } else if (me.zone && zone !== me.zone && me.zone.table.state !== 'match') {
+      lobby.leave()
       sfx.padLeave()
     }
   }
   const myTable = me.zone?.table
 
-  bots.update(dt, me)
+  lobby.update(dt)
   tables.update(dt, elapsed, me)
   match.update(dt, elapsed)
 
@@ -485,7 +520,7 @@ renderer.setAnimationLoop(() => {
   if (match.active) tut = ''
   else if (!myTable && !save.tutorialDone) tut = idleTime > 6 ? 'Need help? Follow the arrow!' : 'Join a table!'
   hud.setTutorial(tut)
-  hud.setLobby(myTable && !match.active && (myTable.state === 'waiting' || myTable.state === 'countdown') ? { count: `${tables.members(myTable)}/${myTable.cap}`, text: myTable.state === 'countdown' ? `Starting in ${Math.max(1, Math.ceil(myTable.timer))}` : 'Waiting for players...', ready: myTable.state === 'countdown' } : null)
+  hud.setLobby(myTable && !match.active && (myTable.state === 'waiting' || myTable.state === 'countdown') ? { count: `${tables.members(myTable)}/${myTable.cap}`, text: myTable.state === 'countdown' ? `Starting in ${Math.max(1, Math.ceil(myTable.timer))}` : lobby.online() ? 'Waiting for players...' : 'Offline: waiting for the server...', ready: myTable.state === 'countdown' } : null)
   hud.showLeave(!!myTable && !match.active && myTable.state !== 'match')
   fx.setSparkZone(match.active ? null : me.zone ?? (showGuide ? target : null), me.zone ? PAD.mine : PAD.open)
 
@@ -494,7 +529,7 @@ renderer.setAnimationLoop(() => {
   const ct = match.active ? null : myTable ?? nearestTable(p.x, p.z, PAD.cardRange)
   if (ct) {
     const n = tables.members(ct)
-    const status = ct.state === 'countdown' ? { cls: 'ready', text: 'READY!' } : ct.state === 'waiting' ? { cls: 'waiting', text: 'WAITING' } : ct.state === 'playing' || ct.state === 'match' ? { cls: 'playing', text: 'PLAYING' } : null
+    const status = ct.state === 'countdown' ? { cls: 'ready', text: 'READY!' } : ct.state === 'waiting' ? { cls: 'waiting', text: 'WAITING' } : ct.state === 'match' ? { cls: 'playing', text: 'PLAYING' } : null
     cardPos.set(ct.x, TABLE.height + 1.25, ct.z + 0.2)
     card = { pos: cardPos, title: ct.mode, host: ct.host?.name ?? null, count: `${n}/${ct.cap}`, status }
   }
@@ -517,6 +552,7 @@ renderer.setAnimationLoop(() => {
   const piano = at(SPOTS.piano.x, SPOTS.piano.z, 4, AUDIO.ambience.pianoNear * 2.5)
   const chime = at(0, -26, 6, 34)
   updateAmbience(dt, { night: lighting.getNight(), fire: fire.gain, firePan: fire.pan, piano: piano.gain * AUDIO.ambience.piano, pianoPan: piano.pan, chime: chime.gain, chimePan: chime.pan, pianoOn: save.settings.piano })
+  updateMusic(dt, { match: match.active, piano: piano.gain, pianoOn: save.settings.piano })
 
   // emotes: a match cuts them; when one ends or is cut (moved) the others are told
   if (match.active) animator?.stopEmote()
@@ -529,10 +565,13 @@ renderer.setAnimationLoop(() => {
   emoteMenu.setVisible(!match.active)
   // the other players: send this one's presence, draw theirs, list everyone
   me.cash = save.cash
-  remotes.update(dt, { x: p.x, y: p.y, z: p.z, yaw: player.facing, speed }, { wins: save.wins, cash: save.cash, rank: me.rank, flag: me.flag })
+  remotes.update(dt, { x: p.x, y: p.y, z: p.z, yaw: player.facing, speed }, { wins: save.wins, cash: save.cash, rank: me.rank, flag: me.flag, streak: save.streak })
   entities.length = localEntities
   for (const e of remotes.entities) entities.push(e)
   hud.setPlayers(entities, me)
+  // Screen ads: which of the game's screens shows (the result card is reported by match.js)
+  if (!match.active) bloxity.adScreen(menus.isOpen?.() || abilities.isOpen() || inMenu ? 'panel' : myTable && (myTable.state === 'waiting' || myTable.state === 'countdown') ? 'lobby' : 'gameplay')
+  else if (!match.showingResult()) bloxity.adScreen('gameplay')
   hud.update(dt, camera, entities, card, save.settings.tags && (!match.active || match.freeCam))
   menus.update(dt)
   if (pendingReveal.length && !match.active) {
@@ -557,5 +596,5 @@ if (import.meta.env.DEV) {
     resetPlayer({ x, y, z }, facing)
     syncYawToPlayer()
   }
-  window.__game = { player, scene, renderer, camera, postfx, toggleMode, teleport, tables, bots, me, match, save, menus, net, abilities, lighting, isFirstPerson }
+  window.__game = { get animator() { return animator }, get avatar() { return avatar }, player, scene, renderer, camera, postfx, toggleMode, teleport, tables, lobby, remotes, me, match, save, menus, net, abilities, lighting, isFirstPerson }
 }

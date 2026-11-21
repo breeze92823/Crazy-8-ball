@@ -37,9 +37,9 @@ function loop(buf, gain, filter) {
 }
 
 onStart(() => {
-  wind = loop(A.noise.pinkStereo, 0, { type: 'bandpass', f: 500, q: 0.6 })
+  wind = loop(A.noise.pinkStereo, 0, { type: 'bandpass', f: 420, q: 0.9 })
   windFilter = wind.f
-  city = loop(A.noise.brownStereo, 0, { type: 'lowpass', f: 260 })
+  city = loop(A.noise.brownStereo, 0, { type: 'lowpass', f: 220 })
   fireBed = loop(A.noise.brownStereo, 0, { type: 'lowpass', f: 380 })
   wind.g.gain.setTargetAtTime(C.wind, A.ctx.currentTime, 1.5)
   city.g.gain.setTargetAtTime(C.city, A.ctx.currentTime, 2)
@@ -73,21 +73,21 @@ function schedulePiano(t0) {
 function bird(t) {
   const pan = rnd(-0.8, 0.8)
   const n = 2 + Math.floor(rnd(0, 4))
-  const base = rnd(2800, 4200)
+  const base = rnd(2400, 3400)
   for (let i = 0; i < n; i++) {
     const at = t + i * rnd(0.08, 0.14)
-    tone({ t: at, f: base * rnd(0.95, 1.1), f2: base * rnd(1.15, 1.5), glide: 0.05, a: 0.005, d: 0.06, gain: 0.02, pan, verb: 0.3, bus: A.amb })
+    tone({ t: at, f: base * rnd(0.95, 1.1), f2: base * rnd(1.1, 1.35), glide: 0.05, a: 0.008, d: 0.06, gain: 0.012, pan, verb: 0.3, bus: A.amb })
   }
 }
 function cricket(t) {
-  const f = rnd(4300, 5200)
+  const f = rnd(3400, 4000)
   const pan = rnd(-0.7, 0.7)
-  for (let i = 0; i < 3; i++) tone({ t: t + i * 0.045, f, a: 0.004, d: 0.025, gain: 0.01, pan, bus: A.amb })
+  for (let i = 0; i < 3; i++) tone({ t: t + i * 0.05, f, a: 0.008, d: 0.03, gain: 0.0045, pan, bus: A.amb })
 }
 function horn(t) {
   const f = rnd(330, 440)
-  const g = 0.012
-  for (const d of [0, 1.26]) tone({ t, type: 'sawtooth', f: f * (d ? 1.26 : 1), a: 0.03, hold: rnd(0.2, 0.5), d: 0.3, gain: g, pan: rnd(-0.8, 0.8), verb: 0.6, lp: 900, bus: A.amb })
+  const g = 0.007
+  for (const d of [0, 1.26]) tone({ t, type: 'sawtooth', f: f * (d ? 1.26 : 1), a: 0.03, hold: rnd(0.2, 0.5), d: 0.3, gain: g, pan: rnd(-0.8, 0.8), verb: 0.6, lp: 650, bus: A.amb })
 }
 function chime(t) {
   const notes = [1568, 1760, 2093, 2349, 2637, 3136]
@@ -109,9 +109,10 @@ export function update(dt, s) {
   const ctx = A.ctx
   const t = ctx.currentTime
   // gusts
-  if (wind && Math.random() < dt * 0.35) {
-    wind.g.gain.setTargetAtTime(C.wind * rnd(0.5, 1.6), t, rnd(0.8, 2.5))
-    windFilter.frequency.setTargetAtTime(rnd(350, 900), t, 1.5)
+  // gusts: gentle swells only (slow time constants, a narrow level range), never a roar
+  if (wind && Math.random() < dt * 0.2) {
+    wind.g.gain.setTargetAtTime(C.wind * rnd(...C.gust), t, rnd(1.8, 3.5))
+    windFilter.frequency.setTargetAtTime(rnd(...C.windBand), t, 2.5)
   }
   fireBed?.g.gain.setTargetAtTime(state.fire * C.fire * 0.35, t, 0.3)
   if (clock < C.tick) return
@@ -125,7 +126,7 @@ export function update(dt, s) {
     if (Math.random() < day) bird(t + 0.05)
     else for (let i = 0; i < 4; i++) cricket(t + i * rnd(0.3, 0.6))
   }
-  if (state.night > 0.5 && Math.random() < 0.5) cricket(t + rnd(0, 0.2))
+  if (state.night > 0.5 && Math.random() < 0.15) cricket(t + rnd(0, 0.2))
   if (nextHorn <= 0) {
     nextHorn = rnd(...C.hornEvery)
     horn(t + 0.05)

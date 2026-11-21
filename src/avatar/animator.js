@@ -4,6 +4,7 @@
 // cycle at two depths, its phase advancing with distance travelled so the feet
 // stay planted at any speed. Writes only to bones and the avatar root's
 // rotation / position.y (the player group owns world placement).
+import { Euler, Quaternion } from 'three'
 import { ANIM } from '../config.js'
 import { PlayerRig, PoseBuffer } from './rig.js'
 
@@ -18,6 +19,30 @@ const kneeCurve = (phase) => {
 }
 
 const L = ANIM.locomotion
+const DEG = Math.PI / 180
+// A Boxity catalogue clip track [[time, xDeg, yDeg, zDeg], ...] at `t`: clamped outside the keys,
+// smoothstep between them (docs.bloxity.io Emotes).
+function sampleTrack(keys, t) {
+  if (t <= keys[0][0]) return keys[0]
+  const last = keys[keys.length - 1]
+  if (t >= last[0]) return last
+  for (let i = 0; i < keys.length - 1; i++) {
+    const a = keys[i]
+    const b = keys[i + 1]
+    if (t >= a[0] && t <= b[0]) {
+      const s = ease((t - a[0]) / (b[0] - a[0] || 1))
+      SAMPLE[1] = a[1] + (b[1] - a[1]) * s
+      SAMPLE[2] = a[2] + (b[2] - a[2]) * s
+      SAMPLE[3] = a[3] + (b[3] - a[3]) * s
+      return SAMPLE
+    }
+  }
+  return null
+}
+const SAMPLE = [0, 0, 0, 0]
+const euler = new Euler()
+const qa = new Quaternion()
+const qb = new Quaternion()
 
 export function makeAnimator(root) {
   if (!root) return null
@@ -51,11 +76,26 @@ class PlayerAnimator {
     this.emoteWeight = 0
     this.emoteSpin = 0
     this.emotePose = new PoseBuffer()
+    // Boxity catalogue emote (emote picker, boxityEmotes.js): degree deltas over each bone's bind
+    // pose, written over the rig's output. Bind rotations captured now, before any pose is applied.
+    this.clip = null // { id, clip: { len, loop, tracks }, time, on }
+    this.clipWeight = 0
+    this.bind = new Map()
+    for (const [name, node] of Object.entries(root.nodes ?? {})) if (node?.quaternion) this.bind.set(name, node.quaternion.clone())
+    this.rigBones = new Set(this.rig.bindings.map((b) => b.bone))
+  }
+
+  // Plays a Boxity catalogue emote { len, loop, tracks } from its start; moving stops it.
+  playClip(id, clip) {
+    if (!clip?.tracks) return this.stopEmote()
+    this.emoteOn = false
+    this.clip = { id, clip, time: 0, on: true }
   }
 
   // Plays emote `def` (emotes.js) from its start; moving or leaving the ground stops it.
   playEmote(def) {
     if (!def) return this.stopEmote()
+    if (this.clip) this.clip.on = false
     this.emote = def
     this.emoteOn = true
     this.emoteTime = 0
@@ -63,11 +103,12 @@ class PlayerAnimator {
 
   stopEmote() {
     this.emoteOn = false
+    if (this.clip) this.clip.on = false
   }
 
   // The emote playing now (null once it ended or was cut short).
   get emoteId() {
-    return this.emoteOn ? this.emote.id : null
+    return this.emoteOn ? this.emote.id : this.clip?.on ? this.clip.id : null
   }
 
   dispose() {
@@ -85,7 +126,43 @@ class PlayerAnimator {
     this.blend(dt)
     this.applyEmote(dt, input)
     this.rig.applyPose(this.output)
+    this.applyClip(dt, input)
     this.applyVisual(dt, input)
+  }
+
+  applyClip(dt, input) {
+    const c = this.clip
+    if (!c) return
+    try {
+      const len = Math.max(0.01, Number(c.clip.len) || 1)
+      if (c.on) {
+        c.time += dt
+        if (input.speed > L.idleSpeed || !input.grounded || (!c.clip.loop && c.time >= len)) c.on = false
+      }
+      // ~0.1 s in, a touch quicker out
+      this.clipWeight += ((c.on ? 1 : 0) - this.clipWeight) * (1 - Math.exp(-(c.on ? 10 : 14) * dt))
+      const done = !c.on && this.clipWeight < 0.01
+      const t = c.clip.loop ? c.time % len : Math.min(c.time, len)
+      for (const name in c.clip.tracks) {
+        const keys = c.clip.tracks[name]
+        const bone = this.root.nodes?.[name]
+        const bind = this.bind.get(name)
+        if (!bone || !bind || !Array.isArray(keys) || !keys.length) continue // a bone this rig lacks: ignored
+        if (!this.rigBones.has(bone)) bone.quaternion.copy(bind) // not posed by the gait: start from rest
+        if (done) continue
+        const v = sampleTrack(keys, t)
+        if (!v) continue
+        euler.set(v[1] * DEG, v[2] * DEG, v[3] * DEG, 'XYZ')
+        qa.copy(bind).multiply(qb.setFromEuler(euler))
+        bone.quaternion.slerp(qa, this.clipWeight)
+      }
+      if (done) {
+        this.clip = null
+        this.clipWeight = 0
+      }
+    } catch {
+      this.clip = null // cosmetic: never break a frame
+    }
   }
 
   resolveState(dt, input) {
