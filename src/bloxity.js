@@ -183,6 +183,14 @@ export function init() {
     SDK.init({ gameSlug: GAME_SLUG })
     // Boxity's emote button only shows over games that register, as soon as init returns.
     SDK.game.registerFeature?.('emotes')
+    // Leaderboards: declared right after init (docs.bloxity.io) and on their own, so a later SDK
+    // call failing can never skip it. Declaring is what creates the board (game page Leaderboard,
+    // trophy button); the game server reports the scores (backend boxity.ts BOARDS, same declaration).
+    try {
+      SDK.leaderboard?.define?.(LEADERBOARDS)
+    } catch (err) {
+      console.warn('[bloxity] leaderboard.define failed', err)
+    }
     SDK.game.loadingStep(`Loading ${GAME_TITLE}`)
     const offEnv = SDK.onEnvironmentChanged?.((e) => emit(envListeners, e))
     if (typeof offEnv === 'function') unsubscribers.push(offEnv)
@@ -251,9 +259,6 @@ export function init() {
       // banners stay off (the owner's choice).
       SDK.ads.declareScreens?.({ lobby: {}, results: {}, panel: {}, gameplay: {} })
     }
-    // Leaderboards: declared in the browser too (it shows Boxity's trophy button); the game server
-    // reports the scores (backend boxity.ts BOARDS, the same declaration).
-    SDK.leaderboard?.define?.(LEADERBOARDS)
 
     SDK.game.loadingStep('Building the island')
   } catch (err) {
