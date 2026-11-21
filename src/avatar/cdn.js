@@ -4,7 +4,10 @@
 // it would load. Pure string-building only — avatar/loader.js is the
 // sole consumer. Ported from Clean Leaves for Loot.
 
-const AVATAR_CDN = 'https://static.bloxity.io/avatars'
+import { apiUrl, staticUrl } from '../bloxity.js'
+
+// Hosts come from the environment Boxity told the page (prod when nothing was told), never hardcoded.
+const cdn = () => `${staticUrl()}/avatars`
 
 // The SDK's own "nothing equipped" sentinels — '' / 'undefined' (as literal
 // strings) / null for hats/back items — collapsed to one check so callers
@@ -28,28 +31,34 @@ export const AVATAR_SLOTS = [
   // Hair and masks load exactly like hats (same folders, same anchor).
   { key: 'hairId', kind: 'item', type: 'hats', attach: 'Neck1', at: [0, 0.8, 0] },
   { key: 'maskId', kind: 'item', type: 'hats', attach: 'Neck1', at: [0, 0.8, 0] },
-  // The docs give these origins in model space; converted to each bone's local
-  // space (Spine2 sits at y 4.2, Spine1 at y 2.4). No URL pattern is documented,
-  // so they load through the catalogue's assetPaths only.
-  { key: 'neckId', kind: 'item', attach: 'Spine2', at: [0, 0.6, 0] },
-  { key: 'chestId', kind: 'item', attach: 'Spine2', at: [0, -0.6, 0] },
-  { key: 'waistId', kind: 'item', attach: 'Spine1', at: [0, 0, 0] },
+]
+
+// Accessories authored in the body's rest pose (docs.bloxity.io CDN asset URLs): parented with
+// restInverse(bone) x translate(origin); a pair's right piece is the left one mirrored across x.
+// The SDK's avatar.getAccessorySlots() registry wins when present (slots added later show up with
+// no code change); this table is the documented fallback.
+export const REST_SLOTS = [
+  { field: 'neckId', type: 'neck', bone: 'Spine2', origin: [0, 4.8, 0] },
+  { field: 'chestId', type: 'chest', bone: 'Spine2', origin: [0, 3.6, 0] },
+  { field: 'waistId', type: 'waist', bone: 'Spine1', origin: [0, 2.4, 0] },
+  { field: 'handId', type: 'hand', bone: 'ArmL2_leaf', mirrorBone: 'ArmR2_leaf', origin: [0, 0, 0] },
+  { field: 'shoesId', type: 'shoes', bone: 'LegL2_leaf', mirrorBone: 'LegR2_leaf', origin: [0, 0, 0] },
 ]
 
 export function partUrl(slot, id) {
   const suffix = slot.side ? `_${slot.side}` : ''
-  return `${AVATAR_CDN}/parts/${slot.type}/${id}${suffix}.glb`
+  return `${cdn()}/parts/${slot.type}/${id}${suffix}.glb`
 }
 
 export function itemUrls(slot, id) {
   return {
-    mesh: `${AVATAR_CDN}/items/${slot.type}/${id}.obj`,
-    texture: `${AVATAR_CDN}/textures/${slot.type}/${id}.png`,
+    mesh: `${cdn()}/items/${slot.type}/${id}.obj`,
+    texture: `${cdn()}/textures/${slot.type}/${id}.png`,
   }
 }
 
 export function skinUrl(id) {
-  return `${AVATAR_CDN}/skins/${id}.png`
+  return `${cdn()}/skins/${id}.png`
 }
 
 // The skin with the worn face, shirt and pants drawn on, built by hand for
@@ -63,7 +72,7 @@ export function composedSkinUrl(equipped) {
   if (isEquipped(pantsId)) name += `_pn${pantsId}`
   if (isEquipped(shirtId)) name += `_sh${shirtId}`
   if (isEquipped(faceId)) name += `_fc${faceId}`
-  return `https://api.bloxity.io/v1/avatar/skin-texture/${name}.png`
+  return `${apiUrl()}/v1/avatar/skin-texture/${name}.png`
 }
 
 // --- Catalogue ---------------------------------------------------------
@@ -71,7 +80,6 @@ export function composedSkinUrl(equipped) {
 // (`assetPaths` per item) rather than a URL pattern, so an item stored
 // somewhere unexpected still loads. Cached by id; a failed lookup resolves to
 // null so callers fall back to the pattern URLs above.
-const AVATAR_API = 'https://api.bloxity.io'
 const catalogue = new Map()
 
 export function describeItem(id) {
@@ -79,7 +87,7 @@ export function describeItem(id) {
   const key = String(id)
   let request = catalogue.get(key)
   if (!request) {
-    request = fetch(`${AVATAR_API}/v1/avatar/items/${encodeURIComponent(key)}`)
+    request = fetch(`${apiUrl()}/v1/avatar/items/${encodeURIComponent(key)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json()
@@ -93,21 +101,21 @@ export function describeItem(id) {
 // `assetPaths` entries are host-relative ('/avatars/...') or absolute.
 export function assetUrl(path) {
   if (!path) return null
-  return path.startsWith('http') ? path : `https://static.bloxity.io${path}`
+  return path.startsWith('http') ? path : `${staticUrl()}${path}`
 }
 
 export function hatObjUrl(id) {
-  return isEquipped(id) ? `${AVATAR_CDN}/items/hats/${id}.obj` : null
+  return isEquipped(id) ? `${cdn()}/items/hats/${id}.obj` : null
 }
 
 export function hatTextureUrl(id) {
-  return isEquipped(id) ? `${AVATAR_CDN}/textures/hats/${id}.png` : null
+  return isEquipped(id) ? `${cdn()}/textures/hats/${id}.png` : null
 }
 
 export function backObjUrl(id) {
-  return isEquipped(id) ? `${AVATAR_CDN}/items/back/${id}.obj` : null
+  return isEquipped(id) ? `${cdn()}/items/back/${id}.obj` : null
 }
 
 export function backTextureUrl(id) {
-  return isEquipped(id) ? `${AVATAR_CDN}/textures/back/${id}.png` : null
+  return isEquipped(id) ? `${cdn()}/textures/back/${id}.png` : null
 }

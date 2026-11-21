@@ -33,7 +33,7 @@
 }
 .mt-card.right { padding: 3px 3px 3px 8px; justify-content: flex-end; }
 .mt-card .pf { position: relative; height: 100%; aspect-ratio: 1; flex: none; }
-.mt-card .pf img { width: 100%; height: 100%; border-radius: 50%; border: 2px solid var(--ink); display: block; background: #bfe6ff; }
+.mt-card .pf img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; border: 2px solid var(--ink); display: block; background: #bfe6ff; }
 .mt-card .pf .ring { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); transform: rotate(-90deg); opacity: 0; }
 .mt-card .pf .ring circle { fill: none; stroke: #2fdc5a; stroke-width: 4.5; stroke-linecap: round; transition: stroke-dashoffset 0.2s linear; }
 .mt-card.turn .pf .ring { opacity: 1; }
@@ -117,6 +117,17 @@
   border-radius: 999px; border: 3px solid var(--ink); background: linear-gradient(180deg, #8e9bb5, #5d6884); color: #fff; font-size: clamp(14px, 2vmin, 18px); font-weight: 700;
 }
 .mt-pocket { position: absolute; left: 0; top: 0; border-radius: 50%; border: 4px solid rgba(255, 210, 61, 0.85); box-shadow: 0 0 10px rgba(255, 210, 61, 0.6), inset 0 0 10px rgba(255, 210, 61, 0.4); animation: pkpulse 1.1s ease-in-out infinite; }
+/* calling the 8 ball's pocket: a tappable marker on each pocket, the called one gold with an 8 */
+.mt-calls { position: absolute; inset: 0; pointer-events: none; }
+.match-layer .mt-call {
+  position: absolute; left: 0; top: 0; width: clamp(44px, 6.2vmin, 60px); aspect-ratio: 1; border-radius: 50%; padding: 0;
+  border: 3px dashed rgba(255, 255, 255, 0.9); background: rgba(20, 22, 58, 0.35); display: grid; place-items: center;
+}
+.mt-call span { display: none; width: 62%; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle, #fff 0 36%, #141414 38%); color: var(--ink); font-weight: 700; font-size: clamp(11px, 1.7vmin, 15px); place-items: center; }
+.mt-call.on { border: 4px solid #ffd23d; background: rgba(255, 210, 61, 0.3); box-shadow: 0 0 14px rgba(255, 210, 61, 0.8); animation: pkpulse 1.1s ease-in-out infinite; }
+.mt-call.on span { display: grid; }
+.match-layer .mt-call.ro { pointer-events: none; }
+.mt-callhint { position: absolute; left: 50%; bottom: calc(var(--safe-b) + clamp(128px, 19vmin, 186px)); transform: translateX(-50%); color: #ffd23d; font-weight: 700; font-size: clamp(14px, 2.3vmin, 22px); white-space: nowrap; }
 @keyframes pkpulse { 50% { border-color: rgba(255, 230, 120, 1); box-shadow: 0 0 18px rgba(255, 210, 61, 0.9), inset 0 0 14px rgba(255, 210, 61, 0.6); } }
 .mt-movelbl { position: absolute; left: 0; top: 0; color: #4d7cff; font-weight: 700; font-size: clamp(12px, 1.8vmin, 16px); --ink: #0d1f5c; }
 .mt-hint-drag { position: absolute; left: 41%; bottom: 20%; width: clamp(70px, 10vmin, 120px); }
@@ -230,7 +241,7 @@
 .mt-roulette .box { width: min(84vw, 440px); padding: 14px 18px 18px; border-radius: 22px; border: 4px solid var(--ink); background: radial-gradient(circle at 20% 30%, rgba(200, 215, 240, 0.6) 0 12%, transparent 13%), radial-gradient(circle at 85% 70%, rgba(200, 215, 240, 0.6) 0 10%, transparent 11%), linear-gradient(180deg, #ffffff, #e3ebf8); display: flex; flex-direction: column; align-items: center; gap: 8px; animation: mtpop2 0.4s cubic-bezier(.2, 1.5, .4, 1); }
 .mt-roulette h2 { margin: 0; font-size: clamp(26px, 5vmin, 44px); color: #ffd23d; -webkit-text-stroke: 2px #6a3d00; paint-order: stroke fill; text-shadow: 0 3px 0 #6a3d00; }
 .mt-roulette .face { width: clamp(84px, 14vmin, 130px); aspect-ratio: 1; border-radius: 50%; border: 5px solid #ffd23d; box-shadow: 0 0 0 3px #6a3d00; overflow: hidden; }
-.mt-roulette .face img { width: 100%; height: 100%; display: block; }
+.mt-roulette .face img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .mt-roulette .nm { font-weight: 700; font-size: clamp(16px, 2.6vmin, 22px); min-height: 1.3em; }
 .mt-roulette.picked .face { animation: rpick 0.6s cubic-bezier(.2, 1.8, .4, 1); box-shadow: 0 0 0 3px #6a3d00, 0 0 26px 8px rgba(255, 210, 61, 0.9); }
 @keyframes rpick { 0% { transform: scale(1); } 40% { transform: scale(1.3) rotate(-6deg); } 100% { transform: scale(1.08); } }
@@ -242,6 +253,10 @@
 .mt-res-card h2 { margin: 0; font-size: 46px; color: #fff; }
 .mt-res-card .reward { margin: 10px 0 4px; font-size: 30px; font-weight: 700; color: #2f9e44; }
 .mt-res-card p { margin: 4px 0 14px; font-weight: 600; }
+.mt-res-card .mt-ad { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: 0 0 10px; padding: 0 16px; font-size: clamp(16px, 4.2vw, 19px); background: linear-gradient(180deg, #ffe066, #f5a524); box-shadow: 0 4px 0 #a05a00; color: #3a2200; }
+.mt-res-card .mt-ad.hidden { display: none; }
+.mt-res-card .mt-ad .play { font-size: 0.8em; }
+.mt-res-card .mt-ad:disabled { opacity: 0.7; }
 .mt-res-card button { min-height: 52px; padding: 0 36px; border-radius: 16px; border: 3px solid var(--ink); background: linear-gradient(180deg, #5cc8ff, #2b8fe0); box-shadow: 0 4px 0 #1b4f8a; color: #fff; font-size: 22px; font-weight: 700; }
 
 /* --- small / portrait screens --- */
@@ -264,7 +279,7 @@
   .mt-ability { bottom: calc(var(--safe-b) + 66px); width: min(84vw, 420px); }
   .mt-armed { bottom: calc(var(--safe-b) + 70px); }
   .mt-bip { bottom: calc(var(--safe-b) + 136px); }
-  .mt-invalid { bottom: calc(var(--safe-b) + 178px); }
+  .mt-invalid, .mt-callhint { bottom: calc(var(--safe-b) + 178px); }
   .mt-info { bottom: calc(var(--safe-b) + 136px); }
 }
 /* short landscape phones: power bar lower and shorter, skip button tucked under the cards */
@@ -275,7 +290,7 @@
   .mt-banner { top: calc(var(--top) + 50px); }
   .mt-ability { height: 40px; }
   .mt-bip { bottom: calc(var(--safe-b) + 62px); }
-  .mt-invalid { bottom: calc(var(--safe-b) + 98px); }
+  .mt-invalid, .mt-callhint { bottom: calc(var(--safe-b) + 98px); }
 }
 /* phones in portrait: skip button under the cards, tutorial line below it, spin above the ability bar */
 @media (max-width: 640px) and (max-aspect-ratio: 1/1) {
@@ -286,3 +301,9 @@
 /* in a match the cash pill always sits in the bottom-left corner (the touch layout lifts it for the joystick) */
 .in-match .hud-bl { bottom: calc(env(safe-area-inset-bottom, 0px) + 10px) !important; }
 .in-match .hud-cash { transform: scale(0.85); transform-origin: 0 100%; }
+
+/* ball in hand: a hand resting on the cue ball until it is grabbed */
+.mt-hint-ball { position: absolute; left: 0; top: 0; width: clamp(40px, 6vmin, 64px); pointer-events: none; }
+.mt-hint-ball .hand { margin: 4px 0 0 2px; animation: hgrab 1.3s ease-in-out infinite; transform-origin: 30% 10%; filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.3)); }
+.mt-hint-ball .hand svg { display: block; width: 100%; height: auto; }
+@keyframes hgrab { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-3px, -5px) scale(0.92); } }

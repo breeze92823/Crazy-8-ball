@@ -24,6 +24,10 @@ const proportionListeners = new Set()
 const authListeners = new Set()
 const settingListeners = new Set()
 const respawnListeners = new Set()
+const emoteListeners = new Set()
+const chatListeners = new Set()
+const breakListeners = new Set()
+const envListeners = new Set()
 const unsubscribers = []
 
 function emit(listeners, ...args) {
@@ -61,6 +65,46 @@ export function onRespawnRequest(fn) {
   respawnListeners.add(fn)
   return () => respawnListeners.delete(fn)
 }
+// Boxity's emote picker: fn(id) to play a catalogue emote (24-char id), fn('') to stop it.
+export function onPortalEmote(fn) {
+  emoteListeners.add(fn)
+  return () => emoteListeners.delete(fn)
+}
+// Boxity chat in this player's room: fn({ userId, username, text, isGif, at, isLocalPlayer },
+// bubbleText, seconds). Subscribing is the opt-in (Boxity only forwards chat to games that listen).
+export function onChat(fn) {
+  chatListeners.add(fn)
+  return () => chatListeners.delete(fn)
+}
+// Ad breaks Boxity runs over the game: fn(true) when one starts (pause + mute), fn(false) when over.
+export function onAdBreak(fn) {
+  breakListeners.add(fn)
+  return () => breakListeners.delete(fn)
+}
+
+// The told environment changed (an embedded game learns it from the portal handshake, after init).
+export function onEnvironmentChanged(fn) {
+  envListeners.add(fn)
+  return () => envListeners.delete(fn)
+}
+
+// --- Environment ------------------------------------------------------------
+// Where Boxity lives for this page (prod / stage / local), as the platform TOLD us: the SDK's
+// environment(), else the page's injected window.BLOXITY_ENV, else prod. Never guessed from a URL.
+const PROD_ENV = { env: 'prod', apiUrl: 'https://api.bloxity.io', playUrl: 'https://play.bloxity.io', portalUrl: 'https://bloxity.io', staticUrl: 'https://static.bloxity.io' }
+export function environment() {
+  try {
+    const e = sdk()?.environment?.()
+    if (e?.apiUrl) return e
+  } catch {
+    // Older SDK builds have no environment().
+  }
+  const told = typeof window !== 'undefined' ? window.BLOXITY_ENV : null
+  return told?.apiUrl ? told : PROD_ENV
+}
+const trimSlash = (u) => String(u || '').replace(/\/$/, '')
+export const apiUrl = () => trimSlash(environment().apiUrl)
+export const staticUrl = () => trimSlash(environment().staticUrl)
 
 // --- Auth ---------------------------------------------------------------
 // The SDK fires onUserChanged immediately with a null user, then again once the
@@ -112,13 +156,7 @@ export function getPfp() {
   const raw = authState.user?.pfp || authState.guest?.pfp
   if (typeof raw !== 'string' || !raw) return ''
   try {
-    let base = 'https://static.bloxity.io'
-    try {
-      base = sdk()?.environment?.()?.staticUrl || base
-    } catch {
-      // Older SDK builds have no environment().
-    }
-    const url = new URL(raw, base)
+    const url = new URL(raw, staticUrl())
     return /^https?:$/.test(url.protocol) ? url.href : ''
   } catch {
     return ''
@@ -142,9 +180,12 @@ export function init() {
   }
 
   try {
-    const onLocalhost = /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname)
-    SDK.init(onLocalhost ? { gameSlug: GAME_SLUG, portalUrl: 'https://bloxity.io' } : { gameSlug: GAME_SLUG })
+    SDK.init({ gameSlug: GAME_SLUG })
+    // Boxity's emote button only shows over games that register, as soon as init returns.
+    SDK.game.registerFeature?.('emotes')
     SDK.game.loadingStep(`Loading ${GAME_TITLE}`)
+    const offEnv = SDK.onEnvironmentChanged?.((e) => emit(envListeners, e))
+    if (typeof offEnv === 'function') unsubscribers.push(offEnv)
 
     for (const key of Object.keys(SETTINGS)) {
       const off = SDK.settings.listen(key, (raw) => {
@@ -178,10 +219,41 @@ export function init() {
     }
 
     unsubscribers.push(
-      SDK.player.onEvent((event) => {
+      SDK.player.onEvent((event, data) => {
         if (event === 'respawn_request') emit(respawnListeners)
+        else if (event === 'play_emote' && typeof data === 'string') emit(emoteListeners, data)
+        else if (event === 'stop_emote') emit(emoteListeners, '')
+        // The portal took the mouse (its menu opened over the game): let go of pointer lock too.
+        else if (event === 'pointer_lock_changed' && data === false && document.pointerLockElement) document.exitPointerLock?.()
       }),
     )
+    // Overhead chat bubbles (main.js draws them over the name tags).
+    if (typeof SDK.chat?.onMessage === 'function') {
+      unsubscribers.push(
+        SDK.chat.onMessage((m) => {
+          if (!m || typeof m !== 'object') return
+          let text = ''
+          try {
+            text = SDK.chat.bubbleText(m)
+          } catch {
+            text = m.isGif ? 'sent a GIF' : String(m.text ?? '')
+          }
+          emit(chatListeners, m, text, Number(SDK.chat.bubbleSeconds) || 4)
+        }),
+      )
+    }
+    // Ad breaks (midrolls, rewarded): the game pauses and goes quiet while one plays.
+    if (SDK.ads) {
+      const a = SDK.ads.onBreakStart?.(() => emit(breakListeners, true))
+      const b = SDK.ads.onBreakEnd?.(() => emit(breakListeners, false))
+      for (const off of [a, b]) if (typeof off === 'function') unsubscribers.push(off)
+      // Screen ads: the screens this game has. No title menu (the hub is the menu); gameplay
+      // banners stay off (the owner's choice).
+      SDK.ads.declareScreens?.({ lobby: {}, results: {}, panel: {}, gameplay: {} })
+    }
+    // Leaderboards: declared in the browser too (it shows Boxity's trophy button); the game server
+    // reports the scores (backend boxity.ts BOARDS, the same declaration).
+    SDK.leaderboard?.define?.(LEADERBOARDS)
 
     SDK.game.loadingStep('Building the island')
   } catch (err) {
@@ -230,6 +302,72 @@ export function teardown() {
   }
 }
 
+// --- Screen ads, rewarded ads -------------------------------------------------
+// Tell Boxity which screen is showing: 'lobby' | 'results' | 'panel' | 'gameplay' ('' = none).
+// Repeats are ignored; one screen shows at a time.
+let screenNow = null
+export function adScreen(type) {
+  if (type === screenNow) return
+  screenNow = type
+  try {
+    const ads = sdk()?.ads
+    if (!ads) return
+    if (type) ads.screen?.(type)
+    else ads.hideScreen?.()
+  } catch {
+    // Cosmetic.
+  }
+}
+export function rewardedAvailable() {
+  try {
+    return !!sdk()?.ads?.isAvailable?.()
+  } catch {
+    return false
+  }
+}
+// { status: 'completed' | 'skipped' | 'no-fill' | 'blocked' | 'error' | 'denied' | 'disabled', rewardToken? }
+export async function showRewarded(placement) {
+  try {
+    return (await sdk()?.ads?.showRewarded?.(placement)) ?? { status: 'disabled' }
+  } catch {
+    return { status: 'error' }
+  }
+}
+
+// --- Boards, friend toasts, settings refresh -------------------------------------
+// The leaderboards (the backend reports them; ids are permanent once created).
+export const LEADERBOARDS = [{ id: 'wins', label: 'Wins', order: 'desc', mode: 'best', format: 'compact', reset: 'none' }]
+// "Alex joined you" toasts (Boxity only shows them for friends): `already` = they were in the room
+// when this player arrived.
+export function reportPlayer(username, already) {
+  if (!username) return
+  try {
+    const g = sdk()?.game
+    if (already) g?.playerInRoom?.(username)
+    else g?.playerJoined?.(username)
+  } catch {
+    // Cosmetic.
+  }
+}
+// Re-fire every settings listener once the game's systems exist (audio, HUD).
+export function triggerSettings() {
+  try {
+    sdk()?.settings?.triggerAll?.()
+  } catch {
+    // Non-fatal.
+  }
+}
+
+// --- Identity for the game server -------------------------------------------------
+// The player's Boxity JWT ('' for guests / no SDK): the server verifies it (backend boxity.ts).
+export function getToken() {
+  try {
+    return sdk()?.auth?.getToken?.() || ''
+  } catch {
+    return ''
+  }
+}
+
 // --- Avatar accessors (null when the SDK is unavailable or the call throws) ---
 export function getEquippedAvatar() {
   if (latestEquipped) return latestEquipped
@@ -248,6 +386,63 @@ export function getProportions() {
     return latestProportions ? { ...current, ...latestProportions } : current ?? null
   } catch {
     return latestProportions
+  }
+}
+
+// The look as one key (every slot, a custom character, the proportions), for other players.
+export function getOutfitKey() {
+  try {
+    return sdk()?.avatar?.getOutfitKey?.() || ''
+  } catch {
+    return ''
+  }
+}
+// The platform character kit (three.js): dresses `root` (a player.glb clone) in the look `outfitKey`.
+// Resolves the handle, or null when the kit is off / can't draw it (then the manual path draws it).
+export async function dressCharacter(THREE, GLTFLoader, root, outfitKey) {
+  try {
+    const kit = sdk()?.character
+    if (!kit?.dress || !outfitKey || (kit.canDress && !kit.canDress(outfitKey))) return null
+    return (await kit.dress({ THREE, GLTFLoader, root, outfitKey, proportions: 'game' })) || null
+  } catch (err) {
+    console.warn('[bloxity] character kit failed', err)
+    return null
+  }
+}
+// The custom character an equipped set wears ({ glbUrl, ... }), or null.
+export async function getCharacterFor(equipped) {
+  try {
+    const a = sdk()?.avatar
+    if (!a || !equipped) return null
+    return (await (a.getCharacterFor ? a.getCharacterFor(equipped) : a.getCharacter?.())) || null
+  } catch {
+    return null
+  }
+}
+// The bone-attached accessory slots ({ field, bone, mirrorBone?, origin, ... }) and a worn
+// accessory's { mesh, texture } URLs, from the SDK's registry ([] / null without it).
+export function accessorySlots() {
+  try {
+    const s = sdk()?.avatar?.getAccessorySlots?.()
+    return Array.isArray(s) ? s : []
+  } catch {
+    return []
+  }
+}
+export function accessoryUrls(field, id) {
+  try {
+    return sdk()?.avatar?.getAccessoryUrls?.(field, id) || null
+  } catch {
+    return null
+  }
+}
+// Another player's skin with their face, shirt and pants drawn on, or null.
+export function getSkinTextureUrlFor(equipped) {
+  try {
+    const url = sdk()?.avatar?.getSkinTextureUrlFor?.(equipped)
+    return typeof url === 'string' && url ? url : null
+  } catch {
+    return null
   }
 }
 

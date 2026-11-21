@@ -15,6 +15,10 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # Optional: a stage deploy token (hosting.stage.bloxity.io) also ships this build to Boxity's
+      # stage platform. Staging is opt-in and can never block or undo the prod upload.
+      STAGE_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN_STAGE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +71,17 @@ jobs:
           curl -sS -f -X POST \
             "https://api.bloxity.io/v1/hosting/games/${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}/frontend?channel=${{ steps.channel.outputs.channel }}&version=${{ github.sha }}" \
             -H "Authorization: Bearer ${{ secrets.LEGION_DEPLOY_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @build.zip \
+            -w "\nHTTP status: %{http_code}\n"
+
+      - name: Upload to Bloxity stage (only with LEGION_DEPLOY_TOKEN_STAGE)
+        if: env.STAGE_TOKEN != ''
+        continue-on-error: true
+        run: |
+          curl -sS -f -X POST \
+            "https://api.stage.bloxity.io/v1/hosting/games/${{ vars.LEGION_GAME_ID || secrets.LEGION_GAME_ID }}/frontend?channel=${{ steps.channel.outputs.channel }}&version=${{ github.sha }}" \
+            -H "Authorization: Bearer ${STAGE_TOKEN}" \
             -H "Content-Type: application/zip" \
             --data-binary @build.zip \
             -w "\nHTTP status: %{http_code}\n"

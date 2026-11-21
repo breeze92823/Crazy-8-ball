@@ -12,7 +12,9 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import {
   Color,
+  DoubleSide,
   FrontSide,
+  Matrix4,
   MeshStandardMaterial,
   NearestFilter,
   NearestMipmapLinearFilter,
@@ -20,7 +22,8 @@ import {
   TextureLoader,
 } from 'three'
 import { MATERIAL_PBR, PLAYER_DIMS, PROPORTIONS, RIG, RIG_HEIGHT, clamp } from '../config.js'
-import { AVATAR_SLOTS, assetUrl, composedSkinUrl, describeItem, isEquipped, itemUrls, partUrl, skinUrl } from './cdn.js'
+import { AVATAR_SLOTS, REST_SLOTS, assetUrl, composedSkinUrl, describeItem, isEquipped, itemUrls, partUrl, skinUrl } from './cdn.js'
+import { accessorySlots, accessoryUrls } from '../bloxity.js'
 
 const HAT_LIFT = 0.8
 
@@ -164,19 +167,65 @@ async function applyPart(root, slot, id) {
 async function applyItem(root, slot, id) {
   const anchor = root.nodes[slot.attach]
   if (!anchor) return
+  const object = await loadItem(id, slot.type ? itemUrls(slot, id) : {})
+  if (!object) return
+  // Hats are authored for the portal rig, whose renderer parents them to the
+  // head bone lifted 0.8 up; at the bone origin they sink into the head.
+  if (slot.at) object.position.set(...slot.at)
+  else if (slot.key === 'hatId') object.position.set(0, HAT_LIFT, 0)
+  anchor.add(object)
+}
+
+// A rest-pose accessory (REST_SLOTS / the SDK registry): restInverse(bone) x translate(origin),
+// and for a pair the mirrored copy on `mirrorBone`.
+const xyz = (o) => (Array.isArray(o) ? o : [o?.x ?? 0, o?.y ?? 0, o?.z ?? 0]).map((v) => Number(v) || 0)
+async function applyRestItem(root, slot, id) {
+  const rest = root.userData?.rest
+  const bone = root.nodes[slot.bone]
+  if (!rest || !bone || !rest.get(slot.bone)) return
+  const folder = slot.dir || slot.type
+  const object = await loadItem(id, accessoryUrls(slot.field, id) || (folder ? itemUrls({ type: folder }, id) : {}))
+  if (!object) return
+  const origin = new Matrix4().makeTranslation(...xyz(slot.origin))
+  const place = (o, name, mirror) => {
+    const m = rest.get(name).clone().invert()
+    if (mirror) m.multiply(new Matrix4().makeScale(-1, 1, 1))
+    m.multiply(origin).decompose(o.position, o.quaternion, o.scale)
+    root.nodes[name].add(o)
+  }
+  place(object, slot.bone, false)
+  if (slot.mirrorBone && root.nodes[slot.mirrorBone] && rest.get(slot.mirrorBone)) {
+    const copy = object.clone()
+    copy.traverse((o) => {
+      if (o.isMesh) o.material = o.material.clone()
+      if (o.isMesh) o.material.side = DoubleSide // mirrored: the winding flips
+    })
+    place(copy, slot.mirrorBone, true)
+  }
+}
+
+// The rest-pose slots to draw: the SDK's registry (minus the fixed-offset hat/back/hair/mask),
+// else the documented table.
+function restSlots() {
+  const fixed = new Set(AVATAR_SLOTS.map((s) => s.key))
+  const live = accessorySlots().filter((s) => s?.field && s.bone && !fixed.has(s.field))
+  return live.length ? live : REST_SLOTS
+}
+
+// An accessory's .obj with its texture (catalogue assetPaths first, then `fallback` URLs), or null.
+async function loadItem(id, fallback) {
   const item = await describeItem(id)
-  const fallback = slot.type ? itemUrls(slot, id) : {}
   const urls = {
     mesh: assetUrl(item?.assetPaths?.mesh) || fallback.mesh,
     texture: assetUrl(item?.assetPaths?.texture) || fallback.texture,
   }
-  if (!urls.mesh) return
+  if (!urls.mesh) return null
   let object
   try {
     object = await objLoader.loadAsync(urls.mesh)
   } catch (err) {
     console.warn('[avatarLoader] accessory failed to load', urls.mesh, err)
-    return
+    return null
   }
   let texture = null
   try {
@@ -192,11 +241,7 @@ async function applyItem(root, slot, id) {
       texture ? { map: texture, ...MATERIAL_PBR.PLAYER } : { color: '#cccccc', ...MATERIAL_PBR.PLAYER },
     )
   })
-  // Hats are authored for the portal rig, whose renderer parents them to the
-  // head bone lifted 0.8 up; at the bone origin they sink into the head.
-  if (slot.at) object.position.set(...slot.at)
-  else if (slot.key === 'hatId') object.position.set(0, HAT_LIFT, 0)
-  anchor.add(object)
+  return object
 }
 
 // A hat can insist on a head ('-1' = the stock one) because it is modelled
@@ -225,11 +270,14 @@ export async function attachEquippedAccessories(root, equipped, { signal, skinTe
     await applySkin(root, equipped, skinTextureUrl)
     if (signal?.aborted) return
     // Slots load in parallel; each one swallows its own failure.
-    await Promise.all(
-      AVATAR_SLOTS.filter((slot) => isEquipped(equipped[slot.key])).map((slot) =>
+    await Promise.all([
+      ...AVATAR_SLOTS.filter((slot) => isEquipped(equipped[slot.key])).map((slot) =>
         slot.kind === 'part' ? applyPart(root, slot, equipped[slot.key]) : applyItem(root, slot, equipped[slot.key]),
       ),
-    )
+      ...restSlots()
+        .filter((slot) => isEquipped(equipped[slot.field]))
+        .map((slot) => applyRestItem(root, slot, equipped[slot.field])),
+    ])
   } catch (err) {
     console.warn('[avatarLoader] equipping avatar failed', err)
   }

@@ -4,7 +4,7 @@
   --outline: #14163a; /* .hud-outline (hud.css) reads it */
   --edge: clamp(10px, 2vmin, 20px);
   --btn: clamp(64px, 9vmin, 92px);
-  --btn-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--edge));
+  --btn-bottom: max(calc(env(safe-area-inset-bottom, 0px) + var(--edge)), var(--hot-push-r, 0px)); /* --hot-push-r: clear of the hotbar (menus.js) */
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -19,7 +19,7 @@
 #emote-ui.hidden { display: none; }
 #emote-ui.open { z-index: 31; } /* over the left menu buttons (menus.css .mn, 30) while open */
 /* on touch the button sits above the jump / sprint / mode thumb arc (touch.css .touch-cluster) */
-.touch-ui #emote-ui { --btn-bottom: calc(env(safe-area-inset-bottom, 0px) + var(--edge) + clamp(72px, 20vmin, 100px) + clamp(52px, 14vmin, 70px) + 22px); --btn: clamp(56px, 13vmin, 72px); }
+.touch-ui #emote-ui { --btn-bottom: max(calc(env(safe-area-inset-bottom, 0px) + var(--edge) + clamp(72px, 20vmin, 100px) + clamp(52px, 14vmin, 70px) + 22px), var(--hot-push-r, 0px)); --btn: clamp(56px, 13vmin, 72px); }
 
 .em-btn {
   position: absolute;

@@ -37,7 +37,8 @@ export function createSim() {
     balls,
     events: [], // { type: 'ball'|'rail'|'pocket'|'cue', speed, x, z, n }
     firstHit: -1, // first object ball the cue ball touched this shot
-    railAfter: false,
+    railAfter: false, // some ball (the cue ball too) touched a cushion after the cue ball's first contact
+    railBalls: new Set(), // object balls that touched a cushion this shot (a legal break needs 4)
     sunkThisShot: [],
     spin: null,
     mods: null,
@@ -107,6 +108,7 @@ export function createSim() {
     c.vz = Math.sin(angle) * speed
     sim.firstHit = -1
     sim.railAfter = false
+    sim.railBalls = new Set()
     sim.sunkThisShot = []
     sim.mods = mods
     if (mods) mods.cool = new Float32Array(16)
@@ -133,6 +135,11 @@ export function createSim() {
     c.vz = c.vx * sa + c.vz * ca
     c.vx = vx
     s.x *= 0.45
+  }
+  // A ball bounced off a cushion: the rules' "rail after contact" and the break's 4-ball count.
+  function railHit(b) {
+    if (sim.firstHit >= 0) sim.railAfter = true
+    if (b.n !== 0) sim.railBalls.add(b.n)
   }
   function railE(b) {
     const m = sim.mods
@@ -329,7 +336,7 @@ export function createSim() {
           if (!mods?.railE) b.vx *= 0.96
           if (b.n === 0) applySide(b)
           if (sp > 0.05) sim.events.push({ type: 'rail', speed: sp, x: b.x, z: b.z, n: b.n })
-          if (b.n === 0 || sim.firstHit >= 0) sim.railAfter = true
+          railHit(b)
         }
       }
       if (Math.abs(b.x) > HX - R && !inCornerZ) {
@@ -341,7 +348,7 @@ export function createSim() {
           if (!mods?.railE) b.vz *= 0.96
           if (b.n === 0) applySide(b)
           if (sp > 0.05) sim.events.push({ type: 'rail', speed: sp, x: b.x, z: b.z, n: b.n })
-          if (b.n === 0 || sim.firstHit >= 0) sim.railAfter = true
+          railHit(b)
         }
       }
       // jaws: never let a ball escape the table through a mouth; steer it into the nearest pocket
@@ -373,7 +380,8 @@ export function pickShot(sim, legal, skill = 0.6) {
   let best = null
   for (const b of sim.balls) {
     if (!b.on || b.n === 0 || !legal(b.n)) continue
-    for (const [px, pz] of POCKETS) {
+    for (let pk = 0; pk < POCKETS.length; pk++) {
+      const [px, pz] = POCKETS[pk]
       // ghost ball: where the cue ball must be at contact
       const tx = px - b.x
       const tz = pz - b.z
@@ -391,7 +399,7 @@ export function pickShot(sim, legal, skill = 0.6) {
         blocked += segBlock(c.x, c.z, gx, gz, o.x, o.z) + segBlock(b.x, b.z, px, pz, o.x, o.z)
       }
       const score = -cut * 1.6 - ad * 0.25 - td * 0.35 - blocked * 3
-      if (!best || score > best.score) best = { score, angle: Math.atan2(az, ax), dist: ad + td, target: b.n }
+      if (!best || score > best.score) best = { score, angle: Math.atan2(az, ax), dist: ad + td, target: b.n, pocket: pk }
     }
   }
   if (!best) {
@@ -406,11 +414,11 @@ export function pickShot(sim, legal, skill = 0.6) {
         nb = b
       }
     }
-    if (!nb) return { angle: Math.random() * Math.PI * 2, speed: 2, target: -1 }
-    best = { score: -9, angle: Math.atan2(nb.z - c.z, nb.x - c.x), dist: nd, target: nb.n }
+    if (!nb) return { angle: Math.random() * Math.PI * 2, speed: 2, target: -1, pocket: -1 }
+    best = { score: -9, angle: Math.atan2(nb.z - c.z, nb.x - c.x), dist: nd, target: nb.n, pocket: -1 }
   }
   const noise = (1 - skill) * 0.06
-  return { angle: best.angle + (Math.random() - 0.5) * noise, speed: Math.min(5.5, 1.6 + best.dist * 1.15 + Math.random() * 0.6), target: best.target, score: best.score }
+  return { angle: best.angle + (Math.random() - 0.5) * noise, speed: Math.min(5.5, 1.6 + best.dist * 1.15 + Math.random() * 0.6), target: best.target, score: best.score, pocket: best.pocket }
 }
 function segBlock(ax, az, bx, bz, ox, oz) {
   const dx = bx - ax
